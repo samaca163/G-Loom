@@ -1,0 +1,29 @@
+# .NET build output
+bin/
+obj/
+*.user
+*.suo
+*.userprefs
+.vs/
+
+# IDE
+.idea/
+.vscode/
+.claude/
+
+# macOS
+.DS_Store
+
+# Build artifacts
+*.yak
+
+# Local overrides
+*.local.props
+*.local.targets
+
+# NuGet
+*.nupkg
+.nuget/
+
+# Logs
+*.log

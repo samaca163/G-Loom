@@ -1,0 +1,23 @@
+# Default
+* text=auto eol=lf
+
+# Source
+*.cs text diff=csharp
+*.csproj text
+*.props text
+*.targets text
+*.sln text eol=crlf
+*.sh text eol=lf
+*.md text
+
+# Grasshopper definition files
+# Treat as binary for now; Phase 1 will add a custom merge driver
+# and switch these to a structured-text representation.
+*.gh binary
+*.ghx text eol=lf
+*.ghcluster binary
+
+# Image / icon assets
+*.png binary
+*.ico binary
+*.jpg binary
