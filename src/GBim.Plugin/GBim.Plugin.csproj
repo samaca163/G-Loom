@@ -26,12 +26,6 @@
     <UseWindowsForms>true</UseWindowsForms>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
 
-    <!-- Class libraries default to not copying NuGet assets to bin/. We need
-         LibGit2Sharp's managed DLL and its runtimes/<RID>/native/ dylibs in
-         the output so Rhino can load them; flip this on, then use per-package
-         IncludeAssets to opt the Rhino-provided assemblies back out. -->
-    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
-
     <!-- NU1701: Grasshopper NuGet targets net48 but works on net7 inside Rhino 8 -->
     <NoWarn>$(NoWarn);NU1701</NoWarn>
   </PropertyGroup>
@@ -43,10 +37,6 @@
 
     <!-- System.Drawing.Common: compile-only; the .NET 7 host (Rhino) provides it at runtime. -->
     <PackageReference Include="System.Drawing.Common" Version="7.0.0" IncludeAssets="compile" />
-
-    <!-- LibGit2Sharp: copied to output (default IncludeAssets) so the managed
-         assembly AND its runtimes/<RID>/native/ dylibs ship alongside our .gha. -->
-    <PackageReference Include="LibGit2Sharp" Version="0.30.0" />
   </ItemGroup>
 
 </Project>

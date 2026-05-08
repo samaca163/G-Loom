@@ -1,34 +1,36 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
-using System.Linq;
-using LibGit2Sharp;
+using System.Runtime.InteropServices;
 
 namespace GBim.Vcs;
 
 /// <summary>
-/// Thin wrapper over LibGit2Sharp scoped to G-BIM's needs: open or init a repo,
-/// commit a canonical JSON file (and optionally an accompanying .gh) at any
-/// path inside the repo, and read back recent commits and HEAD status.
-/// Stateless - each call opens and disposes its own <see cref="Repository"/>.
+/// Git operations for G-BIM, implemented by shelling out to the system `git`
+/// CLI. We tried LibGit2Sharp first; on Rhino 8 macOS its native dylib's type
+/// initializer fails in ways that resist all the standard fixes (custom
+/// DllImportResolver, pre-loading via NativeLibrary, GlobalSettings.NativeLibraryPath,
+/// install-name symlinks). Shelling out is ~50-100ms per call but rock solid.
 /// </summary>
 public static class GBimRepository
 {
     public sealed record CommitInfo(string Sha, string Author, DateTimeOffset When, string Message);
     public sealed record RepoStatus(string Branch, CommitInfo? LastCommit);
 
-    /// <summary>
-    /// Writes the canonical JSON to <paramref name="canonicalJsonFullPath"/> and
-    /// creates a commit. Optionally also stages an accompanying file (typically
-    /// the .gh) at <paramref name="alsoStageFullPath"/> if it exists on disk.
-    /// </summary>
-    /// <returns>The new commit's SHA, or null if there was nothing to commit.</returns>
+    // ASCII control codes - extremely unlikely to appear in commit messages or
+    // author fields - used as field/record delimiters in `git log` output so we
+    // can split safely without quoting headaches.
+    private const char FieldSep = '';
+    private const char RecordSep = '';
+
     public static string? Commit(
         string repoRoot,
         string canonicalJson,
         string canonicalJsonFullPath,
         string message,
-        Signature author,
+        string authorName,
+        string authorEmail,
         string? alsoStageFullPath = null)
     {
         if (string.IsNullOrWhiteSpace(repoRoot))
@@ -36,76 +38,171 @@ public static class GBimRepository
 
         EnsureDirectoryAndRepo(repoRoot);
 
+        // Write the canonical JSON next to the .gh.
         var jsonDir = Path.GetDirectoryName(canonicalJsonFullPath);
         if (!string.IsNullOrEmpty(jsonDir)) Directory.CreateDirectory(jsonDir);
         File.WriteAllText(canonicalJsonFullPath, canonicalJson);
 
-        using var repo = new Repository(repoRoot);
-
         var jsonRel = ToRepoRelative(repoRoot, canonicalJsonFullPath);
-        LibGit2Sharp.Commands.Stage(repo, jsonRel);
+        Run(repoRoot, "add", "--", jsonRel);
 
         if (!string.IsNullOrEmpty(alsoStageFullPath) && File.Exists(alsoStageFullPath))
         {
             var alsoRel = ToRepoRelative(repoRoot, alsoStageFullPath);
-            LibGit2Sharp.Commands.Stage(repo, alsoRel);
+            Run(repoRoot, "add", "--", alsoRel);
         }
 
-        try
-        {
-            var commit = repo.Commit(message, author, author);
-            return commit.Sha;
-        }
-        catch (EmptyCommitException)
-        {
+        // Anything actually staged?
+        var staged = Run(repoRoot, "diff", "--cached", "--name-only");
+        if (string.IsNullOrWhiteSpace(staged.StdOut))
             return null;
-        }
+
+        var commit = Run(repoRoot,
+            "-c", $"user.name={authorName}",
+            "-c", $"user.email={authorEmail}",
+            "commit", "--message", message);
+
+        if (commit.ExitCode != 0)
+            throw new InvalidOperationException(
+                $"git commit failed (exit {commit.ExitCode}): {commit.StdErr.Trim()}");
+
+        var sha = Run(repoRoot, "rev-parse", "HEAD");
+        return sha.ExitCode == 0 ? sha.StdOut.Trim() : null;
     }
 
     public static IReadOnlyList<CommitInfo> Log(string repoRoot, int limit)
     {
-        if (string.IsNullOrWhiteSpace(repoRoot) || !Repository.IsValid(repoRoot))
-            return Array.Empty<CommitInfo>();
-
+        if (!IsRepo(repoRoot)) return Array.Empty<CommitInfo>();
         if (limit <= 0) limit = 10;
 
-        using var repo = new Repository(repoRoot);
-        return repo.Commits
-            .QueryBy(new CommitFilter { SortBy = CommitSortStrategies.Time })
-            .Take(limit)
-            .Select(c => new CommitInfo(
-                Sha: c.Sha,
-                Author: c.Author?.Name ?? string.Empty,
-                When: c.Author?.When ?? DateTimeOffset.MinValue,
-                Message: c.MessageShort ?? string.Empty))
-            .ToList();
+        var fmt = $"%H{FieldSep}%an{FieldSep}%aI{FieldSep}%s{RecordSep}";
+        var result = Run(repoRoot, "log", $"-n{limit}", $"--pretty=format:{fmt}");
+        if (result.ExitCode != 0) return Array.Empty<CommitInfo>();
+
+        var list = new List<CommitInfo>();
+        foreach (var rec in result.StdOut.Split(RecordSep, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var parts = rec.Trim('\n', '\r').Split(FieldSep);
+            if (parts.Length < 4) continue;
+            DateTimeOffset.TryParse(parts[2], out var when);
+            list.Add(new CommitInfo(parts[0], parts[1], when, parts[3]));
+        }
+        return list;
     }
 
     public static RepoStatus GetStatus(string repoRoot)
     {
-        if (!Repository.IsValid(repoRoot))
+        if (!IsRepo(repoRoot))
             return new RepoStatus("(no repo)", null);
 
-        using var repo = new Repository(repoRoot);
-        var head = repo.Head;
-        var branch = head?.FriendlyName ?? "(detached)";
-        var tip = head?.Tip;
-        var info = tip == null ? null : new CommitInfo(
-            Sha: tip.Sha,
-            Author: tip.Author?.Name ?? string.Empty,
-            When: tip.Author?.When ?? DateTimeOffset.MinValue,
-            Message: tip.MessageShort ?? string.Empty);
-        return new RepoStatus(branch, info);
+        var branch = Run(repoRoot, "rev-parse", "--abbrev-ref", "HEAD");
+        var branchName = branch.ExitCode == 0 ? branch.StdOut.Trim() : "(detached)";
+        if (branchName == "HEAD") branchName = "(detached)";
+
+        var head = Run(repoRoot, "log", "-1",
+            $"--pretty=format:%H{FieldSep}%an{FieldSep}%aI{FieldSep}%s");
+
+        CommitInfo? last = null;
+        if (head.ExitCode == 0 && !string.IsNullOrWhiteSpace(head.StdOut))
+        {
+            var parts = head.StdOut.Trim().Split(FieldSep);
+            if (parts.Length >= 4)
+            {
+                DateTimeOffset.TryParse(parts[2], out var when);
+                last = new CommitInfo(parts[0], parts[1], when, parts[3]);
+            }
+        }
+        return new RepoStatus(branchName, last);
     }
 
-    private static string ToRepoRelative(string repoRoot, string fullPath) =>
-        Path.GetRelativePath(repoRoot, fullPath).Replace('\\', '/');
+    /// <summary>
+    /// Counts commits in the repo that touched <paramref name="repoRelativeFile"/>.
+    /// Returns 0 for a repo with no history of that file.
+    /// </summary>
+    public static int CountCommitsTouching(string repoRoot, string repoRelativeFile)
+    {
+        if (!IsRepo(repoRoot)) return 0;
+        var rel = repoRelativeFile.Replace('\\', '/');
+        var result = Run(repoRoot, "rev-list", "--count", "HEAD", "--", rel);
+        if (result.ExitCode != 0) return 0;
+        return int.TryParse(result.StdOut.Trim(), out var n) ? n : 0;
+    }
+
+    public static bool IsRepo(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) return false;
+        var result = Run(path, "rev-parse", "--is-inside-work-tree");
+        return result.ExitCode == 0 && result.StdOut.Trim() == "true";
+    }
 
     private static void EnsureDirectoryAndRepo(string workingDir)
     {
         if (!Directory.Exists(workingDir))
             Directory.CreateDirectory(workingDir);
-        if (!Repository.IsValid(workingDir))
-            Repository.Init(workingDir);
+        if (!IsRepo(workingDir))
+            Run(workingDir, "init");
+    }
+
+    private static string ToRepoRelative(string repoRoot, string fullPath) =>
+        Path.GetRelativePath(repoRoot, fullPath).Replace('\\', '/');
+
+    // ------------------------------------------------------------------
+    // git binary discovery + invocation
+    // ------------------------------------------------------------------
+
+    private static string? _gitBinaryCache;
+
+    private static string GitBinary()
+    {
+        if (_gitBinaryCache is not null) return _gitBinaryCache;
+
+        // macOS apps inherit a sanitized PATH that often excludes /opt/homebrew/bin
+        // and /usr/local/bin. Try common locations explicitly before falling back
+        // to PATH-based resolution.
+        IEnumerable<string> candidates;
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            candidates = new[] { "/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git" };
+        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            candidates = new[] { @"C:\Program Files\Git\cmd\git.exe", @"C:\Program Files\Git\bin\git.exe" };
+        else
+            candidates = new[] { "/usr/bin/git", "/usr/local/bin/git" };
+
+        foreach (var c in candidates)
+            if (File.Exists(c)) { _gitBinaryCache = c; return c; }
+
+        // Fall back to unqualified - hope it's on PATH.
+        _gitBinaryCache = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "git.exe" : "git";
+        return _gitBinaryCache;
+    }
+
+    private readonly record struct ProcResult(int ExitCode, string StdOut, string StdErr);
+
+    private static ProcResult Run(string workingDir, params string[] args)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = GitBinary(),
+            WorkingDirectory = workingDir,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        foreach (var a in args) psi.ArgumentList.Add(a);
+
+        try
+        {
+            using var proc = Process.Start(psi)
+                ?? throw new InvalidOperationException("Process.Start returned null.");
+            var stdout = proc.StandardOutput.ReadToEnd();
+            var stderr = proc.StandardError.ReadToEnd();
+            proc.WaitForExit();
+            return new ProcResult(proc.ExitCode, stdout, stderr);
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"Could not launch git at '{psi.FileName}'. Is git installed? ({ex.Message})", ex);
+        }
     }
 }

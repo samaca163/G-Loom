@@ -4,7 +4,6 @@ using System.Runtime.InteropServices;
 using Eto.Drawing;
 using GBim.Serialization;
 using GBim.Vcs;
-using LibGit2Sharp;
 using Rhino;
 
 // The plugin compiles against System.Windows.Forms (for GH_Canvas), so we
@@ -171,8 +170,10 @@ public sealed class GBimPanel : Panel
             var nextV = CommitVersioning.NextVersion(s.RepoPath, jsonRel);
             var msg = CommitVersioning.FormatMessage(ghBase, nextV);
 
-            var sig = new Signature("iSamacA", "samaca163@gmail.com", DateTimeOffset.Now);
-            var sha = GBimRepository.Commit(s.RepoPath, json, jsonFull, msg, sig, s.FilePath);
+            var sha = GBimRepository.Commit(
+                s.RepoPath, json, jsonFull, msg,
+                authorName: "iSamacA", authorEmail: "samaca163@gmail.com",
+                alsoStageFullPath: s.FilePath);
 
             if (sha is null)
             {
