@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
 using Grasshopper;
 using Grasshopper.Kernel;
 using Rhino;
@@ -12,7 +15,8 @@ public sealed record TrackedState(
     string? RepoPath,
     string? CanonicalJsonFullPath,
     bool IsTracked,
-    bool HasUnsavedChanges);
+    bool HasUnsavedChanges,
+    string? CurrentRestoredSha);
 
 /// <summary>
 /// Singleton that listens for Grasshopper document open / close / save-as events
@@ -27,7 +31,7 @@ public sealed class DocumentTracker
 
     public event EventHandler? StateChanged;
 
-    private TrackedState _state = new(null, null, null, null, false, false);
+    private TrackedState _state = new(null, null, null, null, false, false, null);
     private readonly System.Collections.Generic.HashSet<GH_Document> _hooked = new();
 
     private DocumentTracker() { }
@@ -74,13 +78,24 @@ public sealed class DocumentTracker
         var isTracked = doc != null && !string.IsNullOrEmpty(path) && repo != null;
         var dirty = doc?.IsModified ?? false;
 
+        // Derive "current commit" from the filesystem - the working-tree
+        // .gbim.json's blob hash identifies which commit's content is on disk.
+        // No persisted marker needed; this survives Grasshopper restarts.
+        string? currentSha = null;
+        if (isTracked && !string.IsNullOrEmpty(jsonFull))
+        {
+            var jsonRel = Path.GetRelativePath(repo!, jsonFull);
+            currentSha = GBimRepository.FindCommitMatchingWorkingTree(repo!, jsonRel);
+        }
+
         var newState = new TrackedState(
             Document: doc,
             FilePath: path,
             RepoPath: repo,
             CanonicalJsonFullPath: jsonFull,
             IsTracked: isTracked,
-            HasUnsavedChanges: dirty);
+            HasUnsavedChanges: dirty,
+            CurrentRestoredSha: currentSha);
 
         // Suppress no-op transitions (prevents re-render flood from ModifiedChanged on every solve).
         if (StatesEquivalent(_state, newState)) return;
@@ -99,10 +114,103 @@ public sealed class DocumentTracker
     /// </summary>
     public void Refresh() => UpdateActive(_state.Document ?? Instances.ActiveCanvas?.Document);
 
+    /// <summary>
+    /// Replaces the active Grasshopper document with the one freshly read from
+    /// <paramref name="filePath"/>. Used after a Restore so the canvas reflects
+    /// the new on-disk state without the user having to close + reopen the file.
+    /// Returns the new document, or null if the reload failed.
+    /// </summary>
+    public GH_Document? ReloadFromDisk(string filePath)
+    {
+        try
+        {
+            var oldDoc = _state.Document;
+            var autoSaveDir = GetAutoSaveDir();
+
+            // Snapshot the AutoSave folder so we can clean up any files that
+            // appear during the reload. Grasshopper's "AutoSave:Unload"
+            // setting triggers a write on RemoveDocument regardless of our
+            // IsModified=false flag, leaving a stale autosave that triggers
+            // the "Last Chance Recovery" dialog next time MyDef.gh opens.
+            var preSnapshot = autoSaveDir is null
+                ? new HashSet<string>()
+                : Directory.EnumerateFiles(autoSaveDir).ToHashSet(StringComparer.Ordinal);
+
+            if (oldDoc != null)
+            {
+                oldDoc.DestroyAutoSaveFiles();
+                oldDoc.IsModified = false;
+                Instances.DocumentServer.RemoveDocument(oldDoc);
+            }
+
+            var newDoc = Instances.DocumentServer.AddDocument(filePath, true);
+            newDoc?.DestroyAutoSaveFiles();
+
+            // Clean autosaves that appeared during the reload, both
+            // synchronously (catches files written during Remove/Add) and
+            // again after a short delay (catches async writes that happen
+            // shortly after AddDocument returns).
+            CleanNewAutosaves(autoSaveDir, preSnapshot);
+            _ = Task.Delay(750).ContinueWith(_ => CleanNewAutosaves(autoSaveDir, preSnapshot));
+
+            return newDoc;
+        }
+        catch (Exception ex)
+        {
+            RhinoApp.WriteLine($"[G-BIM] Reload failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    private static string? GetAutoSaveDir()
+    {
+        try
+        {
+            // Grasshopper's plugin GUID is stable across installs; the path is
+            // ~/Library/Application Support/McNeel/Rhinoceros/<v>/Plug-ins/Grasshopper (<guid>)/AutoSave
+            // on macOS, %APPDATA%\McNeel\Rhinoceros\<v>\plug-ins\... on Windows.
+            var asmDir = Path.GetDirectoryName(typeof(DocumentTracker).Assembly.Location);
+            if (string.IsNullOrEmpty(asmDir)) return null;
+
+            // The plugin folder structure on macOS:
+            // .../Plug-ins/Grasshopper (<guid>)/Libraries/G-BIM/GBim.gha
+            // We want:    .../Plug-ins/Grasshopper (<guid>)/AutoSave
+            var ghPluginDir = Directory.GetParent(asmDir)?.Parent?.FullName;
+            if (string.IsNullOrEmpty(ghPluginDir)) return null;
+
+            var asDir = Path.Combine(ghPluginDir, "AutoSave");
+            return Directory.Exists(asDir) ? asDir : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static void CleanNewAutosaves(string? autoSaveDir, HashSet<string> preSnapshot)
+    {
+        if (autoSaveDir is null || !Directory.Exists(autoSaveDir)) return;
+        try
+        {
+            foreach (var f in Directory.EnumerateFiles(autoSaveDir, "*.gh"))
+            {
+                if (preSnapshot.Contains(f)) continue;
+                try
+                {
+                    File.Delete(f);
+                    RhinoApp.WriteLine($"[G-BIM] Cleaned reload-autosave: {Path.GetFileName(f)}");
+                }
+                catch { /* best effort */ }
+            }
+        }
+        catch { /* best effort */ }
+    }
+
     private static bool StatesEquivalent(TrackedState a, TrackedState b) =>
         ReferenceEquals(a.Document, b.Document) &&
         a.FilePath == b.FilePath &&
         a.RepoPath == b.RepoPath &&
         a.IsTracked == b.IsTracked &&
-        a.HasUnsavedChanges == b.HasUnsavedChanges;
+        a.HasUnsavedChanges == b.HasUnsavedChanges &&
+        a.CurrentRestoredSha == b.CurrentRestoredSha;
 }

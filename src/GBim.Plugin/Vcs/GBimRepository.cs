@@ -116,14 +116,17 @@ public static class GBimRepository
     }
 
     /// <summary>
-    /// Counts commits in the repo that touched <paramref name="repoRelativeFile"/>.
-    /// Returns 0 for a repo with no history of that file.
+    /// Counts commits in the repo that touched any of the given files.
+    /// Returns 0 for a repo with no history of those files. Used by the
+    /// auto-versioning logic; pass both the .gh and the .gbim.json so that
+    /// commits which only changed one are still counted as a version bump.
     /// </summary>
-    public static int CountCommitsTouching(string repoRoot, string repoRelativeFile)
+    public static int CountCommitsTouching(string repoRoot, IEnumerable<string> repoRelativeFiles)
     {
         if (!IsRepo(repoRoot)) return 0;
-        var rel = repoRelativeFile.Replace('\\', '/');
-        var result = Run(repoRoot, "rev-list", "--count", "HEAD", "--", rel);
+        var args = new List<string> { "rev-list", "--count", "HEAD", "--" };
+        foreach (var f in repoRelativeFiles) args.Add(f.Replace('\\', '/'));
+        var result = Run(repoRoot, args.ToArray());
         if (result.ExitCode != 0) return 0;
         return int.TryParse(result.StdOut.Trim(), out var n) ? n : 0;
     }
@@ -133,6 +136,86 @@ public static class GBimRepository
         if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) return false;
         var result = Run(path, "rev-parse", "--is-inside-work-tree");
         return result.ExitCode == 0 && result.StdOut.Trim() == "true";
+    }
+
+    /// <summary>
+    /// Returns true if the working tree matches the index for the given files
+    /// (i.e. no UNSAVED canvas edits since the last snapshot). Deliberately
+    /// ignores staged-vs-HEAD differences so that consecutive Restores - which
+    /// leave staged content - don't disable themselves; the user can chain
+    /// "restore V003, then V001, then V005" without hitting a false dirty
+    /// signal between hops.
+    /// </summary>
+    public static bool AreFilesClean(string repoRoot, IEnumerable<string> repoRelativeFiles)
+    {
+        if (!IsRepo(repoRoot)) return true;
+        var args = new List<string> { "diff", "--quiet", "--" };
+        foreach (var f in repoRelativeFiles) args.Add(f.Replace('\\', '/'));
+        var result = Run(repoRoot, args.ToArray());
+        // git diff --quiet: 0 = no differences, 1 = differences.
+        return result.ExitCode == 0;
+    }
+
+    /// <summary>
+    /// Finds the commit whose copy of <paramref name="repoRelativeFile"/>
+    /// matches the file currently in the working tree (compared by Git blob
+    /// SHA, so it's content-exact, not path/timestamp/mtime). Returns null if
+    /// the working tree's content doesn't match any commit's history of that
+    /// file (e.g. user manually edited it without committing).
+    ///
+    /// This lets us re-derive "current version" across Grasshopper restarts
+    /// without persisting any side state - the filesystem is the source of
+    /// truth.
+    /// </summary>
+    public static string? FindCommitMatchingWorkingTree(string repoRoot, string repoRelativeFile)
+    {
+        if (!IsRepo(repoRoot)) return null;
+        var rel = repoRelativeFile.Replace('\\', '/');
+        var fullPath = Path.Combine(repoRoot, rel);
+        if (!File.Exists(fullPath)) return null;
+
+        // 1. Hash the working-tree file as Git would.
+        var workingHash = Run(repoRoot, "hash-object", "--", rel);
+        if (workingHash.ExitCode != 0) return null;
+        var blobSha = workingHash.StdOut.Trim();
+        if (string.IsNullOrEmpty(blobSha)) return null;
+
+        // 2. Walk recent commits that touched this file, comparing tree blobs.
+        var commits = Run(repoRoot, "log", "-n200", "--format=%H", "--", rel);
+        if (commits.ExitCode != 0) return null;
+
+        foreach (var line in commits.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var sha = line.Trim();
+            if (string.IsNullOrEmpty(sha)) continue;
+
+            // git ls-tree <commit> -- <path> -> "<mode> <type> <blobSha>\t<path>"
+            var ls = Run(repoRoot, "ls-tree", sha, "--", rel);
+            if (ls.ExitCode != 0 || string.IsNullOrWhiteSpace(ls.StdOut)) continue;
+            var firstLine = ls.StdOut.Split('\n')[0];
+            var parts = firstLine.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 3) continue;
+            if (parts[2].Trim() == blobSha) return sha;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Restores the given files at the given commit by running
+    /// `git checkout &lt;sha&gt; -- &lt;files...&gt;`. Throws if git fails.
+    /// </summary>
+    public static void Restore(string repoRoot, string commitSha, IEnumerable<string> repoRelativeFiles)
+    {
+        if (!IsRepo(repoRoot))
+            throw new InvalidOperationException($"{repoRoot} is not a Git repo.");
+
+        var args = new List<string> { "checkout", commitSha, "--" };
+        foreach (var f in repoRelativeFiles) args.Add(f.Replace('\\', '/'));
+
+        var result = Run(repoRoot, args.ToArray());
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException(
+                $"git checkout failed (exit {result.ExitCode}): {result.StdErr.Trim()}");
     }
 
     private static void EnsureDirectoryAndRepo(string workingDir)
