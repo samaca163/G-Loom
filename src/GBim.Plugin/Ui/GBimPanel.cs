@@ -217,14 +217,6 @@ public sealed class GBimPanel : Panel
 
         var commits = GBimRepository.Log(s.RepoPath, _historyLimit, fileScope);
 
-        // Restore is allowed unless the user has UNSAVED canvas edits in the
-        // active document. We deliberately do NOT use `git diff` here:
-        // chained restores naturally leave the working tree differing from
-        // HEAD ("V003 on disk, HEAD at V005") even though the user has made
-        // no edits, and we want the buttons enabled in that state. The
-        // confirm dialog is the safety net for the saved-but-uncommitted case.
-        var canRestore = !s.HasUnsavedChanges;
-
         _historyContainer.Items.Clear();
         foreach (var c in commits)
         {
@@ -232,8 +224,6 @@ public sealed class GBimPanel : Panel
             var row = new CommitRow(
                 info: c,
                 isCurrent: isCurrent,
-                restoreEnabled: canRestore,
-                disabledReason: canRestore ? null : "unsaved canvas edits - save and commit, or undo them first",
                 onRestore: () => OnRestoreClicked(c.Sha, c.Message));
             _historyContainer.Items.Add(new StackLayoutItem(row, HorizontalAlignment.Stretch));
         }
@@ -346,10 +336,15 @@ public sealed class GBimPanel : Panel
         if (!s.IsTracked || s.RepoPath is null || s.FilePath is null) return;
 
         var sha7 = sha[..7];
-        var prompt =
-            $"Restore commit {sha7} ({message})?\n\n" +
-            "Your current canvas state will be replaced with this version, and the " +
-            "file will be reloaded automatically.";
+        var prompt = s.HasUnsavedChanges
+            ? $"Restore commit {sha7} ({message})?\n\n" +
+              "WARNING: you have unsaved canvas edits. They will be discarded " +
+              "and cannot be recovered.\n\n" +
+              "The .gh file on disk will be replaced with this version and " +
+              "reloaded automatically."
+            : $"Restore commit {sha7} ({message})?\n\n" +
+              "Your current canvas state will be replaced with this version, and the " +
+              "file will be reloaded automatically.";
 
         var result = MessageBox.Show(prompt, "G-BIM: Restore version",
             MessageBoxButtons.OKCancel, MessageBoxType.Warning);
@@ -399,8 +394,6 @@ public sealed class GBimPanel : Panel
         public CommitRow(
             GBimRepository.CommitInfo info,
             bool isCurrent,
-            bool restoreEnabled,
-            string? disabledReason,
             Action onRestore)
         {
             var version = CommitVersioning.ExtractVersionLabel(info.Message) ?? "—";
@@ -418,8 +411,7 @@ public sealed class GBimPanel : Panel
             var restoreBtn = new Button
             {
                 Text = "Restore",
-                Enabled = restoreEnabled,
-                ToolTip = restoreEnabled ? "Restore this version to the working tree" : disabledReason,
+                ToolTip = "Restore this version to the working tree",
             };
             restoreBtn.Click += (_, _) => onRestore();
 
