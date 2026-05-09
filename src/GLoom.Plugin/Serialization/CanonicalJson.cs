@@ -1,7 +1,7 @@
 using System.Text.Encodings.Web;
 using System.Text.Json;
 
-namespace GBim.Serialization;
+namespace GLoom.Serialization;
 
 /// <summary>
 /// JSON encoding policy for the canonical document. Indented (line-diff-friendly),

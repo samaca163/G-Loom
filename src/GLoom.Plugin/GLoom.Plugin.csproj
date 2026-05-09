@@ -10,14 +10,14 @@
 
     <!-- Plugin metadata -->
     <Version>0.1.0</Version>
-    <Title>G-BIM</Title>
+    <Title>G-Loom</Title>
     <Authors>iSamacA</Authors>
     <Company>iSamacA</Company>
-    <Description>Git-style version control for Grasshopper 3D.</Description>
+    <Description>Version control for parametric Grasshopper systems. Branches, commits, tags, and on-canvas diffs over the recipe instead of the geometry.</Description>
 
     <!-- Output: a Grasshopper assembly is a .gha (renamed .dll) -->
-    <AssemblyName>GBim</AssemblyName>
-    <RootNamespace>GBim</RootNamespace>
+    <AssemblyName>GLoom</AssemblyName>
+    <RootNamespace>GLoom</RootNamespace>
     <TargetExt>.gha</TargetExt>
 
     <!-- GH_Canvas derives from System.Windows.Forms.Control; enable WinForms.

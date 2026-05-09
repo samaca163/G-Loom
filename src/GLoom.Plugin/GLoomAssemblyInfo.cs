@@ -2,17 +2,18 @@ using System;
 using System.Drawing;
 using Grasshopper.Kernel;
 
-namespace GBim;
+namespace GLoom;
 
-public sealed class GBimAssemblyInfo : GH_AssemblyInfo
+public sealed class GLoomAssemblyInfo : GH_AssemblyInfo
 {
-    public override string Name => "G-BIM";
+    public override string Name => "G-Loom";
 
     public override Bitmap? Icon => null;
 
     public override string Description =>
-        "Git-style version control for Grasshopper 3D. " +
-        "Commits, branches, and visual on-canvas diffs for .gh definitions.";
+        "Version control for parametric Grasshopper systems. " +
+        "Branches, commits, tags, and on-canvas diffs over the recipe " +
+        "instead of the geometry.";
 
     public override Guid Id => new("fee7144c-f1fc-46d8-8710-100464ca0cb4");
 

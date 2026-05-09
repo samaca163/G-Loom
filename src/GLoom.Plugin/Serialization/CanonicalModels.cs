@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace GBim.Serialization;
+namespace GLoom.Serialization;
 
 /// <summary>
 /// Schema v1 of the canonical, diff-friendly representation of a Grasshopper
