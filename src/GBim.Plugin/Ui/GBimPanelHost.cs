@@ -49,7 +49,33 @@ public static class GBimPanelHost
             RhinoApp.WriteLine("[G-BIM] Panel is not registered; cannot open.");
             return;
         }
-        try { Panels.OpenPanel(GBimPanel.PanelId); }
+        try
+        {
+            // Dock alongside any already-open panel (Properties, Layers, etc.)
+            // instead of opening a fresh floating window. A panel that has only
+            // ever lived as a floating window does NOT appear in Rhino's
+            // panel-tab right-click selector, so users who close it can't get
+            // it back. Docking it once teaches Rhino the layout and the panel
+            // sticks in the selector from then on. After the first dock the
+            // user can drag it anywhere; Rhino remembers the position.
+            var openIds = Panels.GetOpenPanelIds();
+            if (openIds != null)
+            {
+                foreach (var pid in openIds)
+                {
+                    if (pid == GBimPanel.PanelId) continue;
+                    Panels.OpenPanelAsSibling(GBimPanel.PanelId, pid, true);
+                    // AsSibling's makeSelected flag isn't always honored when
+                    // the host panel grabs focus right after; re-issue
+                    // OpenPanel to force ours to the front of its tab group.
+                    Panels.OpenPanel(GBimPanel.PanelId, true);
+                    return;
+                }
+            }
+            // No host panel to dock against - fall back to the default open
+            // (will float, but at least we tried).
+            Panels.OpenPanel(GBimPanel.PanelId, true);
+        }
         catch (Exception ex) { RhinoApp.WriteLine($"[G-BIM] Could not open panel: {ex.Message}"); }
     }
 }
