@@ -79,13 +79,16 @@ public sealed class DocumentTracker
         var dirty = doc?.IsModified ?? false;
 
         // Derive "current commit" from the filesystem - the working-tree
-        // .gbim.json's blob hash identifies which commit's content is on disk.
-        // No persisted marker needed; this survives Grasshopper restarts.
+        // .gh + .gbim.json blob pair uniquely identifies which commit's
+        // content is on disk. No persisted marker needed; survives restarts.
+        // Both files are required because the JSON is structural-only and
+        // alone wouldn't disambiguate slider-only edits between commits.
         string? currentSha = null;
-        if (isTracked && !string.IsNullOrEmpty(jsonFull))
+        if (isTracked && !string.IsNullOrEmpty(jsonFull) && !string.IsNullOrEmpty(path))
         {
+            var ghRel = Path.GetRelativePath(repo!, path);
             var jsonRel = Path.GetRelativePath(repo!, jsonFull);
-            currentSha = GBimRepository.FindCommitMatchingWorkingTree(repo!, jsonRel);
+            currentSha = GBimRepository.FindCommitMatchingWorkingTree(repo!, ghRel, jsonRel);
         }
 
         var newState = new TrackedState(

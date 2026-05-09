@@ -188,31 +188,46 @@ public static class GBimRepository
     }
 
     /// <summary>
-    /// Finds the commit whose copy of <paramref name="repoRelativeFile"/>
-    /// matches the file currently in the working tree (compared by Git blob
-    /// SHA, so it's content-exact, not path/timestamp/mtime). Returns null if
-    /// the working tree's content doesn't match any commit's history of that
-    /// file (e.g. user manually edited it without committing).
+    /// Finds the commit whose copy of ALL <paramref name="repoRelativeFiles"/>
+    /// matches the working tree (compared by Git blob SHA, so it's content-
+    /// exact, not path/timestamp/mtime). Returns null when no single commit's
+    /// pair matches the working tree (e.g. user hand-edited a file).
     ///
-    /// This lets us re-derive "current version" across Grasshopper restarts
-    /// without persisting any side state - the filesystem is the source of
-    /// truth.
+    /// Why multi-file: the canonical .gbim.json is structural-only (Phase 1a),
+    /// so a slider tweak commits a new .gh with a byte-identical JSON. Hashing
+    /// only the JSON would resolve "current" to the previous JSON-bumping
+    /// commit, leaving the panel arrow stuck. Hashing both files together
+    /// ties "current" to a unique commit.
+    ///
+    /// This also lets us re-derive "current version" across Grasshopper
+    /// restarts without any persisted side state - the filesystem is the
+    /// source of truth.
     /// </summary>
-    public static string? FindCommitMatchingWorkingTree(string repoRoot, string repoRelativeFile)
+    public static string? FindCommitMatchingWorkingTree(string repoRoot, params string[] repoRelativeFiles)
     {
         if (!IsRepo(repoRoot)) return null;
-        var rel = repoRelativeFile.Replace('\\', '/');
-        var fullPath = Path.Combine(repoRoot, rel);
-        if (!File.Exists(fullPath)) return null;
+        if (repoRelativeFiles.Length == 0) return null;
 
-        // 1. Hash the working-tree file as Git would.
-        var workingHash = Run(repoRoot, "hash-object", "--", rel);
-        if (workingHash.ExitCode != 0) return null;
-        var blobSha = workingHash.StdOut.Trim();
-        if (string.IsNullOrEmpty(blobSha)) return null;
+        // 1. Hash every working-tree file as Git would.
+        var expected = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var f in repoRelativeFiles)
+        {
+            var rel = f.Replace('\\', '/');
+            var fullPath = Path.Combine(repoRoot, rel);
+            if (!File.Exists(fullPath)) return null;
 
-        // 2. Walk recent commits that touched this file, comparing tree blobs.
-        var commits = Run(repoRoot, "log", "-n200", "--format=%H", "--", rel);
+            var hash = Run(repoRoot, "hash-object", "--", rel);
+            if (hash.ExitCode != 0) return null;
+            var blob = hash.StdOut.Trim();
+            if (string.IsNullOrEmpty(blob)) return null;
+            expected[rel] = blob;
+        }
+
+        // 2. Walk recent commits that touched any of these files, looking for
+        //    one whose tree-blobs match every working-tree blob.
+        var logArgs = new List<string> { "log", "-n200", "--format=%H", "--" };
+        foreach (var rel in expected.Keys) logArgs.Add(rel);
+        var commits = Run(repoRoot, logArgs.ToArray());
         if (commits.ExitCode != 0) return null;
 
         foreach (var line in commits.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries))
@@ -220,13 +235,17 @@ public static class GBimRepository
             var sha = line.Trim();
             if (string.IsNullOrEmpty(sha)) continue;
 
-            // git ls-tree <commit> -- <path> -> "<mode> <type> <blobSha>\t<path>"
-            var ls = Run(repoRoot, "ls-tree", sha, "--", rel);
-            if (ls.ExitCode != 0 || string.IsNullOrWhiteSpace(ls.StdOut)) continue;
-            var firstLine = ls.StdOut.Split('\n')[0];
-            var parts = firstLine.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 3) continue;
-            if (parts[2].Trim() == blobSha) return sha;
+            var allMatch = true;
+            foreach (var kv in expected)
+            {
+                // git ls-tree <commit> -- <path> -> "<mode> <type> <blobSha>\t<path>"
+                var ls = Run(repoRoot, "ls-tree", sha, "--", kv.Key);
+                if (ls.ExitCode != 0 || string.IsNullOrWhiteSpace(ls.StdOut)) { allMatch = false; break; }
+                var firstLine = ls.StdOut.Split('\n')[0];
+                var parts = firstLine.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 3 || parts[2].Trim() != kv.Value) { allMatch = false; break; }
+            }
+            if (allMatch) return sha;
         }
         return null;
     }
