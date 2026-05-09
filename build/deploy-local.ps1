@@ -1,0 +1,51 @@
+# Build G-BIM and copy the resulting .gha into the local Rhino 8 Grasshopper Libraries folder.
+# Restart Rhino after running for the new build to load.
+#
+# Usage:  powershell -ExecutionPolicy Bypass -File build\deploy-local.ps1
+#   or:   pwsh build\deploy-local.ps1
+# Override defaults via env vars:  $env:DOTNET=...  $env:CONFIG=Debug
+
+$ErrorActionPreference = 'Stop'
+
+$Dotnet = if ($env:DOTNET) { $env:DOTNET } else { 'dotnet' }
+$Config = if ($env:CONFIG) { $env:CONFIG } else { 'Release' }
+
+$Root      = Resolve-Path (Join-Path $PSScriptRoot '..')
+$Project   = Join-Path $Root 'src\GBim.Plugin\GBim.Plugin.csproj'
+$BuildDir  = Join-Path $Root "src\GBim.Plugin\bin\$Config\net7.0-windows"
+$Output    = Join-Path $BuildDir 'GBim.gha'
+
+# Windows Rhino 8 stores third-party Grasshopper libraries under %APPDATA%\Grasshopper\Libraries
+# (different layout from macOS, where they live inside the Rhino plug-in folder).
+$LibrariesDir = Join-Path $env:APPDATA 'Grasshopper\Libraries'
+$TargetDir    = Join-Path $LibrariesDir 'G-BIM'
+
+if (-not (Get-Command $Dotnet -ErrorAction SilentlyContinue)) {
+    Write-Error "[deploy-local] '$Dotnet' not found on PATH. Install the .NET 7+ SDK or set `$env:DOTNET."
+}
+
+if (-not (Test-Path $LibrariesDir)) {
+    Write-Error @"
+[deploy-local] Grasshopper Libraries folder not found:
+  $LibrariesDir
+[deploy-local] Open Rhino 8 + Grasshopper at least once first.
+"@
+}
+
+Write-Host "[deploy-local] Building $Project ($Config)..."
+& $Dotnet build $Project -c $Config --nologo
+if ($LASTEXITCODE -ne 0) { Write-Error "[deploy-local] dotnet build failed (exit $LASTEXITCODE)." }
+
+if (-not (Test-Path $Output)) {
+    Write-Error "[deploy-local] Build did not produce $Output"
+}
+
+# Wipe and copy. We shell out to the system `git` CLI (no LibGit2Sharp), so the
+# .gha is the only thing that needs to ship.
+if (Test-Path $TargetDir) { Remove-Item -Recurse -Force $TargetDir }
+New-Item -ItemType Directory -Path $TargetDir | Out-Null
+Copy-Item -Path $Output -Destination $TargetDir
+
+Write-Host "[deploy-local] Deployed to: $TargetDir"
+Get-ChildItem $TargetDir | ForEach-Object { Write-Host "[deploy-local]   $($_.Name)" }
+Write-Host '[deploy-local] Restart Rhino to load the new build.'

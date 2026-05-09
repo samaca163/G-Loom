@@ -16,8 +16,10 @@ A successor in spirit to [GGit](https://github.com/KaivnD/GGit) (dormant) and a 
 ## Build
 
 ```sh
-~/.dotnet/dotnet build src/GBim.Plugin/GBim.Plugin.csproj -c Release
+dotnet build src/GBim.Plugin/GBim.Plugin.csproj -c Release
 ```
+
+The output `.gha` lands in `src/GBim.Plugin/bin/Release/net7.0-windows/GBim.gha`.
 
 ## Deploy locally (macOS, Rhino 8)
 
@@ -25,11 +27,27 @@ A successor in spirit to [GGit](https://github.com/KaivnD/GGit) (dormant) and a 
 ./build/deploy-local.sh
 ```
 
-This copies the built `GBim.gha` to:
+Copies the built `GBim.gha` to:
 
 ```
 ~/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper (b45a29b1-4343-4035-989e-044e8580d9cf)/Libraries/G-BIM/
 ```
+
+## Deploy locally (Windows, Rhino 8)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build\deploy-local.ps1
+```
+
+Copies the built `GBim.gha` to:
+
+```
+%APPDATA%\Grasshopper\Libraries\G-BIM\
+```
+
+(Windows Rhino 8 stores third-party Grasshopper libraries here, alongside other `.gha` plugins — a different layout from macOS, where they live inside the Rhino plug-in folder.)
+
+## After deploying
 
 Restart Rhino, open Grasshopper. You should see a `G-BIM` ribbon tab with a single `G-BIM Status` component, and on first canvas paint Rhino's command line will print:
 
