@@ -1,4 +1,4 @@
-# Build G-BIM and copy the resulting .gha into the local Rhino 8 Grasshopper Libraries folder.
+# Build G-Loom and copy the resulting .gha into the local Rhino 8 Grasshopper Libraries folder.
 # Restart Rhino after running for the new build to load.
 #
 # Usage:  powershell -ExecutionPolicy Bypass -File build\deploy-local.ps1
@@ -11,14 +11,14 @@ $Dotnet = if ($env:DOTNET) { $env:DOTNET } else { 'dotnet' }
 $Config = if ($env:CONFIG) { $env:CONFIG } else { 'Release' }
 
 $Root      = Resolve-Path (Join-Path $PSScriptRoot '..')
-$Project   = Join-Path $Root 'src\GBim.Plugin\GBim.Plugin.csproj'
-$BuildDir  = Join-Path $Root "src\GBim.Plugin\bin\$Config\net7.0-windows"
-$Output    = Join-Path $BuildDir 'GBim.gha'
+$Project   = Join-Path $Root 'src\GLoom.Plugin\GLoom.Plugin.csproj'
+$BuildDir  = Join-Path $Root "src\GLoom.Plugin\bin\$Config\net7.0-windows"
+$Output    = Join-Path $BuildDir 'GLoom.gha'
 
 # Windows Rhino 8 stores third-party Grasshopper libraries under %APPDATA%\Grasshopper\Libraries
 # (different layout from macOS, where they live inside the Rhino plug-in folder).
 $LibrariesDir = Join-Path $env:APPDATA 'Grasshopper\Libraries'
-$TargetDir    = Join-Path $LibrariesDir 'G-BIM'
+$TargetDir    = Join-Path $LibrariesDir 'G-Loom'
 
 if (-not (Get-Command $Dotnet -ErrorAction SilentlyContinue)) {
     Write-Error "[deploy-local] '$Dotnet' not found on PATH. Install the .NET 7+ SDK or set `$env:DOTNET."

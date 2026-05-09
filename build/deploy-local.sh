@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build G-BIM and copy the resulting .gha into the local Rhino 8 Grasshopper Libraries folder.
+# Build G-Loom and copy the resulting .gha into the local Rhino 8 Grasshopper Libraries folder.
 # Restart Rhino after running for the new build to load.
 
 set -euo pipefail
@@ -8,12 +8,12 @@ DOTNET="${DOTNET:-$HOME/.dotnet/dotnet}"
 CONFIG="${CONFIG:-Release}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROJECT="$ROOT/src/GBim.Plugin/GBim.Plugin.csproj"
-BUILD_DIR="$ROOT/src/GBim.Plugin/bin/$CONFIG/net7.0-windows"
-OUTPUT="$BUILD_DIR/GBim.gha"
+PROJECT="$ROOT/src/GLoom.Plugin/GLoom.Plugin.csproj"
+BUILD_DIR="$ROOT/src/GLoom.Plugin/bin/$CONFIG/net7.0-windows"
+OUTPUT="$BUILD_DIR/GLoom.gha"
 
 GH_PLUGIN_DIR="$HOME/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper (b45a29b1-4343-4035-989e-044e8580d9cf)"
-TARGET_DIR="$GH_PLUGIN_DIR/Libraries/G-BIM"
+TARGET_DIR="$GH_PLUGIN_DIR/Libraries/G-Loom"
 
 if [[ ! -x "$DOTNET" ]]; then
     echo "[deploy-local] dotnet not found at $DOTNET" >&2
@@ -40,7 +40,7 @@ fi
 # so the .gha is the only thing that needs to ship.
 rm -rf "$TARGET_DIR"
 mkdir -p "$TARGET_DIR"
-cp "$BUILD_DIR/GBim.gha" "$TARGET_DIR/"
+cp "$BUILD_DIR/GLoom.gha" "$TARGET_DIR/"
 
 echo "[deploy-local] Deployed to: $TARGET_DIR"
 ls "$TARGET_DIR" | sed 's/^/[deploy-local]   /'
