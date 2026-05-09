@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using Eto.Drawing;
 using GBim.Serialization;
 using GBim.Vcs;
+using Grasshopper.Kernel;
 using Rhino;
 
 // The plugin compiles against System.Windows.Forms (for GH_Canvas), so we
@@ -284,6 +285,26 @@ public sealed class GBimPanel : Panel
 
         try
         {
+            // If the canvas has unsaved edits, persist the .gh to disk first.
+            // Otherwise the committed pair (.gh + .gbim.json) is split-brain:
+            // the JSON reflects live state but the .gh is whatever was last
+            // saved - so a future Restore would bring back stale canvas
+            // content. Also: DocumentSerializer is structural-only (Phase 1a),
+            // so a slider/panel-text edit produces an identical JSON; without
+            // saving the .gh first, git sees no changes and the commit is a no-op.
+            if (s.HasUnsavedChanges)
+            {
+                var io = new GH_DocumentIO { Document = s.Document };
+                if (!io.SaveQuiet(s.FilePath))
+                {
+                    MessageBox.Show(
+                        "Could not save the .gh file before commit. Aborting.",
+                        "G-BIM", MessageBoxButtons.OK, MessageBoxType.Error);
+                    return;
+                }
+                s.Document.IsModified = false;
+            }
+
             var canonical = DocumentSerializer.Serialize(s.Document);
             var json = CanonicalJson.Write(canonical);
 
