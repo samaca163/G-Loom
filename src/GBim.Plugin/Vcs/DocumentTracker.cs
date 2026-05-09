@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Grasshopper;
+using Grasshopper.GUI.Canvas;
 using Grasshopper.Kernel;
 using Rhino;
 
@@ -32,7 +33,8 @@ public sealed class DocumentTracker
     public event EventHandler? StateChanged;
 
     private TrackedState _state = new(null, null, null, null, false, false, null);
-    private readonly System.Collections.Generic.HashSet<GH_Document> _hooked = new();
+    private readonly HashSet<GH_Document> _hooked = new();
+    private readonly HashSet<GH_Canvas> _hookedCanvases = new();
 
     private DocumentTracker() { }
 
@@ -43,11 +45,24 @@ public sealed class DocumentTracker
         Instances.DocumentServer.DocumentAdded += OnDocumentAdded;
         Instances.DocumentServer.DocumentRemoved += OnDocumentRemoved;
 
+        // Tab/window switches between open .gh files don't fire DocumentServer
+        // events - we have to listen on the canvas itself for the active doc
+        // swap. CanvasCreated covers future canvases; the loop covers the one
+        // that may already exist by the time PriorityLoad runs.
+        Instances.CanvasCreated += HookCanvas;
+        if (Instances.ActiveCanvas != null) HookCanvas(Instances.ActiveCanvas);
+
         foreach (GH_Document doc in Instances.DocumentServer)
             HookDocument(doc);
 
         var active = Instances.ActiveCanvas?.Document;
         if (active != null) UpdateActive(active);
+    }
+
+    private void HookCanvas(GH_Canvas canvas)
+    {
+        if (canvas is null || !_hookedCanvases.Add(canvas)) return;
+        canvas.DocumentChanged += (s, e) => UpdateActive(canvas.Document);
     }
 
     private void OnDocumentAdded(GH_DocumentServer sender, GH_Document doc)
