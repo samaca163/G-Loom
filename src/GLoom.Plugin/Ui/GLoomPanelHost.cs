@@ -4,19 +4,19 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.IO;
-using GBim.Vcs;
+using GLoom.Vcs;
 using Rhino;
 using Rhino.PlugIns;
 using Rhino.UI;
 
-namespace GBim.Ui;
+namespace GLoom.Ui;
 
 /// <summary>
-/// Registers the G-BIM Eto panel with Rhino's panel system. Borrows
+/// Registers the G-Loom Eto panel with Rhino's panel system. Borrows
 /// Grasshopper's plugin instance for registration since .gha plugins aren't
 /// directly Rhino plugins.
 /// </summary>
-public static class GBimPanelHost
+public static class GLoomPanelHost
 {
     private static readonly Guid GrasshopperPluginId = new("b45a29b1-4343-4035-989e-044e8580d9cf");
 
@@ -31,20 +31,20 @@ public static class GBimPanelHost
         var ghPlugin = PlugIn.Find(GrasshopperPluginId);
         if (ghPlugin is null)
         {
-            RhinoApp.WriteLine("[G-BIM] Could not find Grasshopper plugin; panel not registered.");
+            RhinoApp.WriteLine("[G-Loom] Could not find Grasshopper plugin; panel not registered.");
             return;
         }
 
         try
         {
             var icon = BuildLogo();
-            Panels.RegisterPanel(ghPlugin, typeof(GBimPanel), "G-BIM", icon);
+            Panels.RegisterPanel(ghPlugin, typeof(GLoomPanel), "G-Loom", icon);
             _registered = true;
-            RhinoApp.WriteLine($"[G-BIM] Panel registered (icon: {(icon != null ? $"{icon.Width}x{icon.Height}" : "none")}).");
+            RhinoApp.WriteLine($"[G-Loom] Panel registered (icon: {(icon != null ? $"{icon.Width}x{icon.Height}" : "none")}).");
         }
         catch (Exception ex)
         {
-            RhinoApp.WriteLine($"[G-BIM] Panel registration failed: {ex.Message}");
+            RhinoApp.WriteLine($"[G-Loom] Panel registration failed: {ex.Message}");
         }
     }
 
@@ -64,7 +64,7 @@ public static class GBimPanelHost
         }
         catch (Exception ex)
         {
-            RhinoApp.WriteLine($"[G-BIM] Could not build logo icon: {ex.Message}");
+            RhinoApp.WriteLine($"[G-Loom] Could not build logo icon: {ex.Message}");
             return null;
         }
     }
@@ -118,7 +118,7 @@ public static class GBimPanelHost
     {
         if (!_registered)
         {
-            RhinoApp.WriteLine("[G-BIM] Panel is not registered; cannot open.");
+            RhinoApp.WriteLine("[G-Loom] Panel is not registered; cannot open.");
             return;
         }
         try
@@ -135,19 +135,19 @@ public static class GBimPanelHost
             {
                 foreach (var pid in openIds)
                 {
-                    if (pid == GBimPanel.PanelId) continue;
-                    Panels.OpenPanelAsSibling(GBimPanel.PanelId, pid, true);
+                    if (pid == GLoomPanel.PanelId) continue;
+                    Panels.OpenPanelAsSibling(GLoomPanel.PanelId, pid, true);
                     // AsSibling's makeSelected flag isn't always honored when
                     // the host panel grabs focus right after; re-issue
                     // OpenPanel to force ours to the front of its tab group.
-                    Panels.OpenPanel(GBimPanel.PanelId, true);
+                    Panels.OpenPanel(GLoomPanel.PanelId, true);
                     return;
                 }
             }
             // No host panel to dock against - fall back to the default open
             // (will float, but at least we tried).
-            Panels.OpenPanel(GBimPanel.PanelId, true);
+            Panels.OpenPanel(GLoomPanel.PanelId, true);
         }
-        catch (Exception ex) { RhinoApp.WriteLine($"[G-BIM] Could not open panel: {ex.Message}"); }
+        catch (Exception ex) { RhinoApp.WriteLine($"[G-Loom] Could not open panel: {ex.Message}"); }
     }
 }

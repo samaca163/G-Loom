@@ -8,7 +8,7 @@ using Grasshopper.GUI.Canvas;
 using Grasshopper.Kernel;
 using Rhino;
 
-namespace GBim.Vcs;
+namespace GLoom.Vcs;
 
 public sealed record TrackedState(
     GH_Document? Document,
@@ -94,7 +94,7 @@ public sealed class DocumentTracker
         var dirty = doc?.IsModified ?? false;
 
         // Derive "current commit" from the filesystem - the working-tree
-        // .gh + .gbim.json blob pair uniquely identifies which commit's
+        // .gh + .gloom.json blob pair uniquely identifies which commit's
         // content is on disk. No persisted marker needed; survives restarts.
         // Both files are required because the JSON is structural-only and
         // alone wouldn't disambiguate slider-only edits between commits.
@@ -103,7 +103,7 @@ public sealed class DocumentTracker
         {
             var ghRel = Path.GetRelativePath(repo!, path);
             var jsonRel = Path.GetRelativePath(repo!, jsonFull);
-            currentSha = GBimRepository.FindCommitMatchingWorkingTree(repo!, ghRel, jsonRel);
+            currentSha = GLoomRepository.FindCommitMatchingWorkingTree(repo!, ghRel, jsonRel);
         }
 
         var newState = new TrackedState(
@@ -121,7 +121,7 @@ public sealed class DocumentTracker
         _state = newState;
 
         if (isTracked)
-            RhinoApp.WriteLine($"[G-BIM] Tracking {Path.GetFileName(path)} in repo {repo}");
+            RhinoApp.WriteLine($"[G-Loom] Tracking {Path.GetFileName(path)} in repo {repo}");
 
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -175,7 +175,7 @@ public sealed class DocumentTracker
         }
         catch (Exception ex)
         {
-            RhinoApp.WriteLine($"[G-BIM] Reload failed: {ex.Message}");
+            RhinoApp.WriteLine($"[G-Loom] Reload failed: {ex.Message}");
             return null;
         }
     }
@@ -191,7 +191,7 @@ public sealed class DocumentTracker
             if (string.IsNullOrEmpty(asmDir)) return null;
 
             // The plugin folder structure on macOS:
-            // .../Plug-ins/Grasshopper (<guid>)/Libraries/G-BIM/GBim.gha
+            // .../Plug-ins/Grasshopper (<guid>)/Libraries/G-Loom/GLoom.gha
             // We want:    .../Plug-ins/Grasshopper (<guid>)/AutoSave
             var ghPluginDir = Directory.GetParent(asmDir)?.Parent?.FullName;
             if (string.IsNullOrEmpty(ghPluginDir)) return null;
@@ -216,7 +216,7 @@ public sealed class DocumentTracker
                 try
                 {
                     File.Delete(f);
-                    RhinoApp.WriteLine($"[G-BIM] Cleaned reload-autosave: {Path.GetFileName(f)}");
+                    RhinoApp.WriteLine($"[G-Loom] Cleaned reload-autosave: {Path.GetFileName(f)}");
                 }
                 catch { /* best effort */ }
             }

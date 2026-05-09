@@ -4,16 +4,16 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 
-namespace GBim.Vcs;
+namespace GLoom.Vcs;
 
 /// <summary>
-/// Git operations for G-BIM, implemented by shelling out to the system `git`
+/// Git operations for G-Loom, implemented by shelling out to the system `git`
 /// CLI. We tried LibGit2Sharp first; on Rhino 8 macOS its native dylib's type
 /// initializer fails in ways that resist all the standard fixes (custom
 /// DllImportResolver, pre-loading via NativeLibrary, GlobalSettings.NativeLibraryPath,
 /// install-name symlinks). Shelling out is ~50-100ms per call but rock solid.
 /// </summary>
-public static class GBimRepository
+public static class GLoomRepository
 {
     public sealed record CommitInfo(string Sha, string Author, DateTimeOffset When, string Message);
     public sealed record RepoStatus(string Branch, CommitInfo? LastCommit);
@@ -149,7 +149,7 @@ public static class GBimRepository
     /// <summary>
     /// Counts commits in the repo that touched any of the given files.
     /// Returns 0 for a repo with no history of those files. Used by the
-    /// auto-versioning logic; pass both the .gh and the .gbim.json so that
+    /// auto-versioning logic; pass both the .gh and the .gloom.json so that
     /// commits which only changed one are still counted as a version bump.
     /// </summary>
     public static int CountCommitsTouching(string repoRoot, IEnumerable<string> repoRelativeFiles)
@@ -175,7 +175,7 @@ public static class GBimRepository
     /// exact, not path/timestamp/mtime). Returns null when no single commit's
     /// pair matches the working tree (e.g. user hand-edited a file).
     ///
-    /// Why multi-file: the canonical .gbim.json is structural-only (Phase 1a),
+    /// Why multi-file: the canonical .gloom.json is structural-only (Phase 1a),
     /// so a slider tweak commits a new .gh with a byte-identical JSON. Hashing
     /// only the JSON would resolve "current" to the previous JSON-bumping
     /// commit, leaving the panel arrow stuck. Hashing both files together

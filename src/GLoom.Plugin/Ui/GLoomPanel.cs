@@ -3,8 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using Eto.Drawing;
-using GBim.Serialization;
-using GBim.Vcs;
+using GLoom.Serialization;
+using GLoom.Vcs;
 using Grasshopper.Kernel;
 using Rhino;
 
@@ -31,12 +31,12 @@ using TableLayout = Eto.Forms.TableLayout;
 using TableRow = Eto.Forms.TableRow;
 using WrapMode = Eto.Forms.WrapMode;
 
-namespace GBim.Ui;
+namespace GLoom.Ui;
 
 [Guid("55f07e53-ad04-44a9-ab21-059f32207842")]
-public sealed class GBimPanel : Panel
+public sealed class GLoomPanel : Panel
 {
-    public static Guid PanelId => typeof(GBimPanel).GUID;
+    public static Guid PanelId => typeof(GLoomPanel).GUID;
 
     private const int DefaultHistoryLimit = 10;
     private const int HistoryIncrement = 10;
@@ -58,7 +58,7 @@ public sealed class GBimPanel : Panel
     private readonly Button _showMoreButton;
     private int _historyLimit = DefaultHistoryLimit;
 
-    public GBimPanel()
+    public GLoomPanel()
     {
         _commitButton = new Button { Text = "Commit current version" };
         _refreshButton = new Button { Text = "Refresh" };
@@ -86,7 +86,7 @@ public sealed class GBimPanel : Panel
             Spacing = new Size(8, 6),
             Rows =
             {
-                new TableRow(new Label { Text = "G-BIM", Font = headerFont }),
+                new TableRow(new Label { Text = "G-Loom", Font = headerFont }),
                 LabelRow("File:",            _filePathLabel),
                 LabelRow("Repository:",      _repoLabel),
                 LabelRow("Branch:",          _branchLabel),
@@ -165,7 +165,7 @@ public sealed class GBimPanel : Panel
 
             // Branch is repo-wide; "last commit" is filtered to this file's pair
             // so multi-file repos don't bleed another file's commit into the panel.
-            var status = GBimRepository.GetStatus(s.RepoPath, fileScope);
+            var status = GLoomRepository.GetStatus(s.RepoPath, fileScope);
             _branchLabel.Text = status.Branch;
             _lastCommitLabel.Text = status.LastCommit is null
                 ? "(no commits yet)"
@@ -202,7 +202,7 @@ public sealed class GBimPanel : Panel
         // Scan a window of this-file commits and look for the SHA. Cheaper than
         // a separate `git log -1 <sha>` round-trip and good enough since the
         // current commit is by definition recent in *this file's* history.
-        var recent = GBimRepository.Log(s.RepoPath!, Math.Max(_historyLimit, 50), fileScope);
+        var recent = GLoomRepository.Log(s.RepoPath!, Math.Max(_historyLimit, 50), fileScope);
         foreach (var c in recent)
             if (c.Sha == currentSha)
                 return CommitVersioning.ExtractVersionLabel(c.Message)
@@ -215,7 +215,7 @@ public sealed class GBimPanel : Panel
     {
         if (s.RepoPath is null || s.FilePath is null) { _historyContainer.Items.Clear(); _showMoreButton.Visible = false; return; }
 
-        var commits = GBimRepository.Log(s.RepoPath, _historyLimit, fileScope);
+        var commits = GLoomRepository.Log(s.RepoPath, _historyLimit, fileScope);
 
         _historyContainer.Items.Clear();
         foreach (var c in commits)
@@ -276,7 +276,7 @@ public sealed class GBimPanel : Panel
         try
         {
             // If the canvas has unsaved edits, persist the .gh to disk first.
-            // Otherwise the committed pair (.gh + .gbim.json) is split-brain:
+            // Otherwise the committed pair (.gh + .gloom.json) is split-brain:
             // the JSON reflects live state but the .gh is whatever was last
             // saved - so a future Restore would bring back stale canvas
             // content. Also: DocumentSerializer is structural-only (Phase 1a),
@@ -289,7 +289,7 @@ public sealed class GBimPanel : Panel
                 {
                     MessageBox.Show(
                         "Could not save the .gh file before commit. Aborting.",
-                        "G-BIM", MessageBoxButtons.OK, MessageBoxType.Error);
+                        "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
                     return;
                 }
                 s.Document.IsModified = false;
@@ -309,7 +309,7 @@ public sealed class GBimPanel : Panel
             var nextV = CommitVersioning.NextVersion(s.RepoPath, ghRel, jsonRel);
             var msg = CommitVersioning.FormatMessage(ghBase, nextV);
 
-            var sha = GBimRepository.Commit(
+            var sha = GLoomRepository.Commit(
                 s.RepoPath, json, jsonFull, msg,
                 authorName: "iSamacA", authorEmail: "samaca163@gmail.com",
                 alsoStageFullPath: s.FilePath);
@@ -317,19 +317,19 @@ public sealed class GBimPanel : Panel
             if (sha is null)
             {
                 MessageBox.Show("Nothing to commit (no changes since last commit).",
-                    "G-BIM", MessageBoxButtons.OK, MessageBoxType.Information);
+                    "G-Loom", MessageBoxButtons.OK, MessageBoxType.Information);
             }
             else
             {
-                RhinoApp.WriteLine($"[G-BIM] Committed {sha[..7]} ({msg})");
+                RhinoApp.WriteLine($"[G-Loom] Committed {sha[..7]} ({msg})");
                 DocumentTracker.Instance.Refresh();
             }
         }
         catch (Exception ex)
         {
-            RhinoApp.WriteLine($"[G-BIM] Commit failed: {ex.Message}");
+            RhinoApp.WriteLine($"[G-Loom] Commit failed: {ex.Message}");
             MessageBox.Show($"Commit failed:\n\n{ex.Message}",
-                "G-BIM", MessageBoxButtons.OK, MessageBoxType.Error);
+                "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
         }
     }
 
@@ -351,7 +351,7 @@ public sealed class GBimPanel : Panel
               "Your current canvas state will be replaced with this version, and the " +
               "file will be reloaded automatically.";
 
-        var result = MessageBox.Show(prompt, "G-BIM: Restore version",
+        var result = MessageBox.Show(prompt, "G-Loom: Restore version",
             MessageBoxButtons.OKCancel, MessageBoxType.Warning);
         if (result != DialogResult.Ok) return;
 
@@ -361,8 +361,8 @@ public sealed class GBimPanel : Panel
             var jsonRel = Path.GetRelativePath(s.RepoPath, s.CanonicalJsonFullPath!);
 
             // 1. Replace the on-disk files with their content at <sha>.
-            GBimRepository.Restore(s.RepoPath, sha, new[] { ghRel, jsonRel });
-            RhinoApp.WriteLine($"[G-BIM] Checked out {sha7} ({message}) on disk.");
+            GLoomRepository.Restore(s.RepoPath, sha, new[] { ghRel, jsonRel });
+            RhinoApp.WriteLine($"[G-Loom] Checked out {sha7} ({message}) on disk.");
 
             // 2. Reload the .gh from disk in-place. The DocumentServer's
             //    DocumentRemoved/Added events fire, so the tracker re-resolves
@@ -377,18 +377,18 @@ public sealed class GBimPanel : Panel
                 MessageBox.Show(
                     $"Files restored to {sha7}, but the live canvas reload failed. " +
                     $"Close and reopen {Path.GetFileName(filePath)} manually to see the change.",
-                    "G-BIM", MessageBoxButtons.OK, MessageBoxType.Warning);
+                    "G-Loom", MessageBoxButtons.OK, MessageBoxType.Warning);
             }
             else
             {
-                RhinoApp.WriteLine($"[G-BIM] Reloaded {Path.GetFileName(filePath)} - canvas now matches {sha7}.");
+                RhinoApp.WriteLine($"[G-Loom] Reloaded {Path.GetFileName(filePath)} - canvas now matches {sha7}.");
             }
         }
         catch (Exception ex)
         {
-            RhinoApp.WriteLine($"[G-BIM] Restore failed: {ex.Message}");
+            RhinoApp.WriteLine($"[G-Loom] Restore failed: {ex.Message}");
             MessageBox.Show($"Restore failed:\n\n{ex.Message}",
-                "G-BIM", MessageBoxButtons.OK, MessageBoxType.Error);
+                "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
         }
     }
 
@@ -397,7 +397,7 @@ public sealed class GBimPanel : Panel
     private sealed class CommitRow : Panel
     {
         public CommitRow(
-            GBimRepository.CommitInfo info,
+            GLoomRepository.CommitInfo info,
             bool isCurrent,
             Action onRestore)
         {

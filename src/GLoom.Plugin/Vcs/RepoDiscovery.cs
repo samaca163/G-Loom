@@ -1,6 +1,6 @@
 using System.IO;
 
-namespace GBim.Vcs;
+namespace GLoom.Vcs;
 
 public static class RepoDiscovery
 {
@@ -26,12 +26,12 @@ public static class RepoDiscovery
     }
 
     /// <summary>
-    /// Sibling JSON filename for a given .gh path: "MyDef.gh" → "MyDef.gbim.json".
+    /// Sibling JSON filename for a given .gh path: "MyDef.gh" → "MyDef.gloom.json".
     /// </summary>
     public static string CanonicalJsonFilenameFor(string ghFilePath)
     {
         var name = Path.GetFileNameWithoutExtension(ghFilePath);
-        return $"{name}.gbim.json";
+        return $"{name}.gloom.json";
     }
 
     public static string CanonicalJsonFullPathFor(string ghFilePath)

@@ -5,7 +5,7 @@ using System.Linq;
 using Grasshopper.Kernel;
 using Grasshopper.Kernel.Special;
 
-namespace GBim.Serialization;
+namespace GLoom.Serialization;
 
 /// <summary>
 /// Walks a live <see cref="GH_Document"/> and emits a <see cref="CanonicalDocument"/>.
