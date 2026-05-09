@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using Eto.Drawing;
 using GLoom.Serialization;
@@ -12,6 +13,9 @@ using Rhino;
 // alias every Eto.Forms type used here to keep names unambiguous.
 using Application = Eto.Forms.Application;
 using Button = Eto.Forms.Button;
+using ButtonMenuItem = Eto.Forms.ButtonMenuItem;
+using ContextMenu = Eto.Forms.ContextMenu;
+using Control = Eto.Forms.Control;
 using DialogResult = Eto.Forms.DialogResult;
 using DynamicLayout = Eto.Forms.DynamicLayout;
 using Font = Eto.Drawing.Font;
@@ -23,6 +27,7 @@ using MessageBoxType = Eto.Forms.MessageBoxType;
 using Padding = Eto.Drawing.Padding;
 using Panel = Eto.Forms.Panel;
 using Scrollable = Eto.Forms.Scrollable;
+using SeparatorMenuItem = Eto.Forms.SeparatorMenuItem;
 using Size = Eto.Drawing.Size;
 using StackLayout = Eto.Forms.StackLayout;
 using StackLayoutItem = Eto.Forms.StackLayoutItem;
@@ -44,13 +49,14 @@ public sealed class GLoomPanel : Panel
     // Top metadata labels
     private readonly Label _filePathLabel = NewValueLabel();
     private readonly Label _repoLabel = NewValueLabel();
-    private readonly Label _branchLabel = NewValueLabel();
+    private readonly Button _branchButton = new() { Text = "-" };
     private readonly Label _currentVersionLabel = NewValueLabel();
     private readonly Label _lastCommitLabel = NewValueLabel();
     private readonly Label _nextVersionLabel = NewValueLabel();
     private readonly Label _dirtyLabel = NewValueLabel();
     private readonly Button _commitButton;
     private readonly Button _refreshButton;
+    private ContextMenu? _branchMenu;
 
     // History list
     private readonly Label _historyHeaderLabel = new() { Text = "History" };
@@ -75,6 +81,7 @@ public sealed class GLoomPanel : Panel
             _historyLimit += HistoryIncrement;
             Refresh();
         };
+        _branchButton.Click += (_, _) => _branchMenu?.Show(_branchButton);
 
         var headerFont = new Font(SystemFont.Bold, 13);
         var sectionFont = new Font(SystemFont.Bold, 11);
@@ -89,7 +96,7 @@ public sealed class GLoomPanel : Panel
                 new TableRow(new Label { Text = "G-Loom", Font = headerFont }),
                 LabelRow("File:",            _filePathLabel),
                 LabelRow("Repository:",      _repoLabel),
-                LabelRow("Branch:",          _branchLabel),
+                LabelRow("Branch:",          _branchButton),
                 LabelRow("Current version:", _currentVersionLabel),
                 LabelRow("Last commit:",     _lastCommitLabel),
                 LabelRow("Next version:",    _nextVersionLabel),
@@ -129,9 +136,9 @@ public sealed class GLoomPanel : Panel
 
     private static Label NewValueLabel() => new() { Text = "-", Wrap = WrapMode.Word };
 
-    private static TableRow LabelRow(string caption, Label valueLabel) =>
+    private static TableRow LabelRow(string caption, Control valueControl) =>
         new(new TableCell(new Label { Text = caption }, false),
-            new TableCell(valueLabel, true));
+            new TableCell(valueControl, true));
 
     private void OnTrackerChanged(object? sender, EventArgs e)
     {
@@ -166,7 +173,8 @@ public sealed class GLoomPanel : Panel
             // Branch is repo-wide; "last commit" is filtered to this file's pair
             // so multi-file repos don't bleed another file's commit into the panel.
             var status = GLoomRepository.GetStatus(s.RepoPath, fileScope);
-            _branchLabel.Text = status.Branch;
+            var branches = GLoomRepository.GetBranches(s.RepoPath);
+            UpdateBranchControl(s, branches, status.Branch);
             _lastCommitLabel.Text = status.LastCommit is null
                 ? "(no commits yet)"
                 : $"{status.LastCommit.Sha[..7]}  {status.LastCommit.Message}";
@@ -188,7 +196,7 @@ public sealed class GLoomPanel : Panel
         catch (Exception ex)
         {
             _commitButton.Enabled = false;
-            _branchLabel.Text = "-";
+            DisableBranchControl();
             _lastCommitLabel.Text = $"(error: {ex.Message})";
             _historyContainer.Items.Clear();
             _showMoreButton.Visible = false;
@@ -240,7 +248,7 @@ public sealed class GLoomPanel : Panel
     {
         _filePathLabel.Text = fileLabel;
         _repoLabel.Text = "-";
-        _branchLabel.Text = "-";
+        DisableBranchControl();
         _currentVersionLabel.Text = "-";
         _lastCommitLabel.Text = "-";
         _nextVersionLabel.Text = "-";
@@ -255,7 +263,7 @@ public sealed class GLoomPanel : Panel
     {
         _filePathLabel.Text = filePath;
         _repoLabel.Text = "(not in a Git repo - run `git init` in the folder)";
-        _branchLabel.Text = "-";
+        DisableBranchControl();
         _currentVersionLabel.Text = "-";
         _lastCommitLabel.Text = "-";
         _nextVersionLabel.Text = "-";
@@ -264,6 +272,186 @@ public sealed class GLoomPanel : Panel
         _historyContainer.Items.Clear();
         _historyHeaderLabel.Text = "History";
         _showMoreButton.Visible = false;
+    }
+
+    private void DisableBranchControl()
+    {
+        _branchButton.Text = "-";
+        _branchButton.Enabled = false;
+        _branchMenu = null;
+    }
+
+    /// <summary>
+    /// Renders the branch dropdown: the button shows the current branch and
+    /// a ▼ hint, and clicking opens a menu listing every branch (active one
+    /// disabled, others switch on click), plus "New branch..." and a
+    /// "Delete branch..." sub-menu of non-current branches.
+    /// </summary>
+    private void UpdateBranchControl(
+        TrackedState s,
+        IReadOnlyList<GLoomRepository.BranchInfo> branches,
+        string statusBranch)
+    {
+        if (branches.Count == 0)
+        {
+            // Brand-new repo, no commits yet -> no branches exist.
+            _branchButton.Text = $"{statusBranch}  (commit something first)";
+            _branchButton.Enabled = false;
+            _branchMenu = null;
+            return;
+        }
+
+        var current = branches.FirstOrDefault(b => b.IsCurrent);
+        var currentName = current?.Name ?? statusBranch;
+        _branchButton.Text = $"▶ {currentName}  ▼";
+        _branchButton.Enabled = true;
+
+        var menu = new ContextMenu();
+        foreach (var b in branches)
+        {
+            var name = b.Name;
+            var item = new ButtonMenuItem
+            {
+                Text = b.IsCurrent ? $"▶ {name}" : name,
+                Enabled = !b.IsCurrent,
+            };
+            if (!b.IsCurrent)
+                item.Click += (_, _) => OnSwitchBranchClicked(s, name);
+            menu.Items.Add(item);
+        }
+        menu.Items.Add(new SeparatorMenuItem());
+
+        var newItem = new ButtonMenuItem { Text = "New branch..." };
+        newItem.Click += (_, _) => OnCreateBranchClicked(s);
+        menu.Items.Add(newItem);
+
+        var deleteRoot = new ButtonMenuItem { Text = "Delete branch..." };
+        var nonCurrent = branches.Where(b => !b.IsCurrent).ToList();
+        foreach (var b in nonCurrent)
+        {
+            var name = b.Name;
+            var sub = new ButtonMenuItem { Text = name };
+            sub.Click += (_, _) => OnDeleteBranchClicked(s, name);
+            deleteRoot.Items.Add(sub);
+        }
+        deleteRoot.Enabled = nonCurrent.Count > 0;
+        menu.Items.Add(deleteRoot);
+
+        _branchMenu = menu;
+    }
+
+    // ---- branch handlers ---------------------------------------------
+
+    private void OnSwitchBranchClicked(TrackedState s, string targetBranch)
+    {
+        if (s.RepoPath is null) return;
+
+        try
+        {
+            var affected = GLoomRepository.ListAffectedGhFiles(s.RepoPath, targetBranch);
+            var fileLines = affected.Count == 0
+                ? "  (none tracked)"
+                : string.Join("\n", affected.Select(f => "  " + f));
+
+            var prompt = s.HasUnsavedChanges
+                ? $"Switch to branch '{targetBranch}'?\n\n" +
+                  "WARNING: you have unsaved canvas edits. They will be discarded " +
+                  "and cannot be recovered.\n\n" +
+                  $"All .gh files in this repo will be swapped to their state on " +
+                  $"'{targetBranch}'. Affected files:\n{fileLines}"
+                : $"Switch to branch '{targetBranch}'?\n\n" +
+                  $"All .gh files in this repo will be swapped to their state on " +
+                  $"'{targetBranch}'. Affected files:\n{fileLines}";
+
+            var result = MessageBox.Show(prompt, "G-Loom: Switch branch",
+                MessageBoxButtons.OKCancel, MessageBoxType.Warning);
+            if (result != DialogResult.Ok) return;
+
+            GLoomRepository.SwitchBranch(s.RepoPath, targetBranch);
+            RhinoApp.WriteLine($"[G-Loom] Switched to branch '{targetBranch}'.");
+
+            DocumentTracker.Instance.ReloadAllInRepo(s.RepoPath);
+            DocumentTracker.Instance.Refresh();
+            // The branch isn't part of TrackedState, so StateChanged may not
+            // fire if working-tree blobs happen to match the prior commit
+            // (e.g. branching off the current HEAD). Re-render directly to
+            // make sure the dropdown reflects the new branch.
+            Refresh();
+        }
+        catch (Exception ex)
+        {
+            RhinoApp.WriteLine($"[G-Loom] Switch failed: {ex.Message}");
+            MessageBox.Show($"Switch failed:\n\n{ex.Message}",
+                "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
+        }
+    }
+
+    private void OnCreateBranchClicked(TrackedState s)
+    {
+        if (s.RepoPath is null) return;
+
+        var name = string.Empty;
+        var ok = Rhino.UI.Dialogs.ShowEditBox(
+            "G-Loom: New branch", "Name:", string.Empty, false, out name);
+        if (!ok || string.IsNullOrWhiteSpace(name)) return;
+        var trimmed = name.Trim();
+
+        try
+        {
+            GLoomRepository.CreateBranch(s.RepoPath, trimmed, checkout: true);
+            RhinoApp.WriteLine($"[G-Loom] Created and switched to branch '{trimmed}'.");
+            DocumentTracker.Instance.Refresh();
+            Refresh();
+        }
+        catch (Exception ex)
+        {
+            RhinoApp.WriteLine($"[G-Loom] Branch creation failed: {ex.Message}");
+            MessageBox.Show($"Branch creation failed:\n\n{ex.Message}",
+                "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
+        }
+    }
+
+    private void OnDeleteBranchClicked(TrackedState s, string targetBranch)
+    {
+        if (s.RepoPath is null) return;
+
+        var prompt = $"Delete branch '{targetBranch}'?\n\nThis cannot be undone.";
+        var result = MessageBox.Show(prompt, "G-Loom: Delete branch",
+            MessageBoxButtons.OKCancel, MessageBoxType.Warning);
+        if (result != DialogResult.Ok) return;
+
+        try
+        {
+            GLoomRepository.DeleteBranch(s.RepoPath, targetBranch, force: false);
+            RhinoApp.WriteLine($"[G-Loom] Deleted branch '{targetBranch}'.");
+            DocumentTracker.Instance.Refresh();
+            Refresh();
+        }
+        catch (Exception ex)
+        {
+            // The most common cause is unmerged commits ("not fully merged").
+            // Offer force-delete; if that also fails, surface the error.
+            var forcePrompt =
+                $"Branch '{targetBranch}' has unmerged commits. Force-delete anyway?\n\n" +
+                $"git error: {ex.Message}";
+            var forceResult = MessageBox.Show(forcePrompt, "G-Loom: Force-delete branch",
+                MessageBoxButtons.OKCancel, MessageBoxType.Warning);
+            if (forceResult != DialogResult.Ok) return;
+
+            try
+            {
+                GLoomRepository.DeleteBranch(s.RepoPath, targetBranch, force: true);
+                RhinoApp.WriteLine($"[G-Loom] Force-deleted branch '{targetBranch}'.");
+                DocumentTracker.Instance.Refresh();
+                Refresh();
+            }
+            catch (Exception forceEx)
+            {
+                RhinoApp.WriteLine($"[G-Loom] Force-delete failed: {forceEx.Message}");
+                MessageBox.Show($"Force-delete failed:\n\n{forceEx.Message}",
+                    "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
+            }
+        }
     }
 
     // ---- commit handler ----------------------------------------------

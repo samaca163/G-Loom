@@ -17,6 +17,7 @@ public static class GLoomRepository
 {
     public sealed record CommitInfo(string Sha, string Author, DateTimeOffset When, string Message);
     public sealed record RepoStatus(string Branch, CommitInfo? LastCommit);
+    public sealed record BranchInfo(string Name, bool IsCurrent);
 
     // ASCII control codes - extremely unlikely to appear in commit messages or
     // author fields - used as field/record delimiters in `git log` output so we
@@ -167,6 +168,123 @@ public static class GLoomRepository
         if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) return false;
         var result = Run(path, "rev-parse", "--is-inside-work-tree");
         return result.ExitCode == 0 && result.StdOut.Trim() == "true";
+    }
+
+    // ------------------------------------------------------------------
+    // Branch operations
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Lists all local branches, with the current one flagged. Empty for a
+    /// brand-new repo with no commits (no branches exist until first commit).
+    /// </summary>
+    public static IReadOnlyList<BranchInfo> GetBranches(string repoRoot)
+    {
+        if (!IsRepo(repoRoot)) return Array.Empty<BranchInfo>();
+
+        // %(HEAD) prints "*" for the current branch, " " otherwise.
+        var fmt = $"%(HEAD){FieldSep}%(refname:short)";
+        var result = Run(repoRoot, "for-each-ref", "refs/heads/", $"--format={fmt}");
+        if (result.ExitCode != 0) return Array.Empty<BranchInfo>();
+
+        var list = new List<BranchInfo>();
+        foreach (var line in result.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var parts = line.TrimEnd('\r').Split(FieldSep, 2);
+            if (parts.Length < 2) continue;
+            var isCurrent = parts[0].Trim() == "*";
+            var name = parts[1].Trim();
+            if (string.IsNullOrEmpty(name)) continue;
+            list.Add(new BranchInfo(name, isCurrent));
+        }
+        return list;
+    }
+
+    public static void CreateBranch(string repoRoot, string name, bool checkout)
+    {
+        if (!IsRepo(repoRoot))
+            throw new InvalidOperationException($"{repoRoot} is not a Git repo.");
+
+        var args = checkout
+            ? new[] { "checkout", "-b", name }
+            : new[] { "branch", name };
+        var result = Run(repoRoot, args);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException(
+                $"git {string.Join(' ', args)} failed (exit {result.ExitCode}): {result.StdErr.Trim()}");
+    }
+
+    /// <summary>
+    /// Switches HEAD to the named branch via plain `git checkout &lt;branch&gt;`.
+    /// This swaps every file in the working tree, not just G-Loom-managed
+    /// files. Throws on conflict or unknown branch.
+    /// </summary>
+    public static void SwitchBranch(string repoRoot, string name)
+    {
+        if (!IsRepo(repoRoot))
+            throw new InvalidOperationException($"{repoRoot} is not a Git repo.");
+
+        var result = Run(repoRoot, "checkout", name);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException(
+                $"git checkout {name} failed (exit {result.ExitCode}): {result.StdErr.Trim()}");
+    }
+
+    public static void DeleteBranch(string repoRoot, string name, bool force)
+    {
+        if (!IsRepo(repoRoot))
+            throw new InvalidOperationException($"{repoRoot} is not a Git repo.");
+
+        var flag = force ? "-D" : "-d";
+        var result = Run(repoRoot, "branch", flag, name);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException(
+                $"git branch {flag} {name} failed (exit {result.ExitCode}): {result.StdErr.Trim()}");
+    }
+
+    /// <summary>
+    /// Returns the union of .gh files tracked on <paramref name="targetBranch"/>
+    /// and currently in the working tree - i.e. every .gh that may be
+    /// added, modified, or removed by `git checkout &lt;targetBranch&gt;`.
+    /// Repo-relative paths, sorted lexicographically.
+    /// </summary>
+    public static IReadOnlyList<string> ListAffectedGhFiles(string repoRoot, string targetBranch)
+    {
+        if (!IsRepo(repoRoot)) return Array.Empty<string>();
+
+        var union = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var f in ListGhFilesAtRef(repoRoot, targetBranch)) union.Add(f);
+        foreach (var f in ListGhFilesInWorkingTree(repoRoot)) union.Add(f);
+
+        var sorted = new List<string>(union);
+        sorted.Sort(StringComparer.Ordinal);
+        return sorted;
+    }
+
+    private static IReadOnlyList<string> ListGhFilesAtRef(string repoRoot, string @ref)
+    {
+        var result = Run(repoRoot, "ls-tree", "-r", "--name-only", @ref);
+        if (result.ExitCode != 0) return Array.Empty<string>();
+        return FilterGh(result.StdOut);
+    }
+
+    private static IReadOnlyList<string> ListGhFilesInWorkingTree(string repoRoot)
+    {
+        var result = Run(repoRoot, "ls-files");
+        if (result.ExitCode != 0) return Array.Empty<string>();
+        return FilterGh(result.StdOut);
+    }
+
+    private static List<string> FilterGh(string output)
+    {
+        var list = new List<string>();
+        foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var trimmed = line.TrimEnd('\r').Trim();
+            if (trimmed.EndsWith(".gh", StringComparison.OrdinalIgnoreCase))
+                list.Add(trimmed);
+        }
+        return list;
     }
 
     /// <summary>

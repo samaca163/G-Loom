@@ -138,11 +138,22 @@ public sealed class DocumentTracker
     /// the new on-disk state without the user having to close + reopen the file.
     /// Returns the new document, or null if the reload failed.
     /// </summary>
-    public GH_Document? ReloadFromDisk(string filePath)
+    public GH_Document? ReloadFromDisk(string filePath) =>
+        ReloadFromDisk(_state.Document, filePath);
+
+    /// <summary>
+    /// Reload variant that targets a specific open document instead of the
+    /// active one. Used by <see cref="ReloadAllInRepo"/> when a branch
+    /// switch needs to refresh several open .gh files at once.
+    ///
+    /// If the target file doesn't exist on disk after the swap (the .gh was
+    /// deleted on the new branch), the old document is closed and null is
+    /// returned. Caller should handle that.
+    /// </summary>
+    public GH_Document? ReloadFromDisk(GH_Document? oldDoc, string filePath)
     {
         try
         {
-            var oldDoc = _state.Document;
             var autoSaveDir = GetAutoSaveDir();
 
             // Snapshot the AutoSave folder so we can clean up any files that
@@ -161,7 +172,11 @@ public sealed class DocumentTracker
                 Instances.DocumentServer.RemoveDocument(oldDoc);
             }
 
-            var newDoc = Instances.DocumentServer.AddDocument(filePath, true);
+            // After a branch switch the file may have been deleted; only
+            // re-add if it still exists on disk.
+            var newDoc = File.Exists(filePath)
+                ? Instances.DocumentServer.AddDocument(filePath, true)
+                : null;
             newDoc?.DestroyAutoSaveFiles();
 
             // Clean autosaves that appeared during the reload, both
@@ -178,6 +193,55 @@ public sealed class DocumentTracker
             RhinoApp.WriteLine($"[G-Loom] Reload failed: {ex.Message}");
             return null;
         }
+    }
+
+    /// <summary>
+    /// Reloads every open Grasshopper document whose file path lives inside
+    /// <paramref name="repoRoot"/>. The originally-active document is reloaded
+    /// last so it remains the active canvas after the swap (DocumentServer
+    /// .AddDocument with displayCanvas=true makes the loaded doc active).
+    ///
+    /// Used after `git checkout &lt;branch&gt;` to bring every affected
+    /// canvas in sync with the new working tree, not just the one the panel
+    /// happens to be looking at.
+    /// </summary>
+    public void ReloadAllInRepo(string repoRoot)
+    {
+        if (string.IsNullOrEmpty(repoRoot)) return;
+
+        var active = _state.Document;
+        var targets = new List<(GH_Document doc, string path)>();
+        foreach (GH_Document doc in Instances.DocumentServer)
+        {
+            if (!doc.IsFilePathDefined) continue;
+            var path = doc.FilePath;
+            if (string.IsNullOrEmpty(path)) continue;
+            if (!IsInsideRepo(path, repoRoot)) continue;
+            targets.Add((doc, path));
+        }
+
+        // Originally-active doc reloads last so it ends up displayed.
+        targets.Sort((a, b) =>
+            ReferenceEquals(a.doc, active) ? 1 :
+            ReferenceEquals(b.doc, active) ? -1 : 0);
+
+        foreach (var t in targets)
+            ReloadFromDisk(t.doc, t.path);
+    }
+
+    private static bool IsInsideRepo(string filePath, string repoRoot)
+    {
+        try
+        {
+            var abs = Path.GetFullPath(filePath);
+            var rep = Path.GetFullPath(repoRoot);
+            if (abs.Equals(rep, StringComparison.OrdinalIgnoreCase)) return true;
+            var prefix = rep.EndsWith(Path.DirectorySeparatorChar)
+                ? rep
+                : rep + Path.DirectorySeparatorChar;
+            return abs.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
     }
 
     private static string? GetAutoSaveDir()
