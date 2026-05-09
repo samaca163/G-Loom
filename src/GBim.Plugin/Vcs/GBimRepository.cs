@@ -170,24 +170,6 @@ public static class GBimRepository
     }
 
     /// <summary>
-    /// Returns true if the working tree matches the index for the given files
-    /// (i.e. no UNSAVED canvas edits since the last snapshot). Deliberately
-    /// ignores staged-vs-HEAD differences so that consecutive Restores - which
-    /// leave staged content - don't disable themselves; the user can chain
-    /// "restore V003, then V001, then V005" without hitting a false dirty
-    /// signal between hops.
-    /// </summary>
-    public static bool AreFilesClean(string repoRoot, IEnumerable<string> repoRelativeFiles)
-    {
-        if (!IsRepo(repoRoot)) return true;
-        var args = new List<string> { "diff", "--quiet", "--" };
-        foreach (var f in repoRelativeFiles) args.Add(f.Replace('\\', '/'));
-        var result = Run(repoRoot, args.ToArray());
-        // git diff --quiet: 0 = no differences, 1 = differences.
-        return result.ExitCode == 0;
-    }
-
-    /// <summary>
     /// Finds the commit whose copy of ALL <paramref name="repoRelativeFiles"/>
     /// matches the working tree (compared by Git blob SHA, so it's content-
     /// exact, not path/timestamp/mtime). Returns null when no single commit's
