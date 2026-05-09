@@ -9,7 +9,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
 
     <!-- Plugin metadata -->
-    <Version>0.0.1</Version>
+    <Version>0.1.0</Version>
     <Title>G-BIM</Title>
     <Authors>iSamacA</Authors>
     <Company>iSamacA</Company>

@@ -20,5 +20,5 @@ public sealed class GBimAssemblyInfo : GH_AssemblyInfo
 
     public override string AuthorContact => "samaca163@gmail.com";
 
-    public override string Version => "0.0.1";
+    public override string Version => "0.1.0";
 }

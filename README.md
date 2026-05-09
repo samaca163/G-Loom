@@ -6,7 +6,16 @@ A successor in spirit to [GGit](https://github.com/KaivnD/GGit) (dormant) and a 
 
 ## Status
 
-**Phase 0 — scaffolding.** A loadable `.gha` that registers a single diagnostic component and attaches the canvas paint hooks we will later use for diff overlays. No Git logic yet.
+**Phase 1 — partial (v0.1.0).** Working commit / log / restore over a real Git repo, exposed through an Eto panel docked next to the Grasshopper canvas. Already shipped:
+
+- Canonical, line-diff-friendly JSON serialization (structural — components, params, wires, groups).
+- Auto-versioned commit messages (`<base>_V###`) per .gh, derived from `git rev-list`.
+- In-place Restore: writes the chosen commit's content to disk and reloads the live document, no manual close/open.
+- "Current version" arrow re-derived from working-tree blob hashes — survives Grasshopper restarts with no side state.
+- Multi-file repos isolated per .gh: each definition's panel sees only its own commits.
+- Live tracking when switching between open .gh tabs.
+
+Still pending in Phase 1: persistent value capture (slider values, panel text, internalized data) and the canvas diff overlay.
 
 ## Requirements
 
@@ -57,9 +66,9 @@ Restart Rhino, open Grasshopper. You should see a `G-BIM` ribbon tab with a sing
 
 ## Roadmap
 
-- **Phase 0** — load a `.gha`, register a placeholder component, attach canvas paint hooks. *(current)*
-- **Phase 1** — canonical JSON serializer over `GH_IO`; LibGit2Sharp wired up; commit + log + checkout; canvas overlay paints add/remove/modify diff against HEAD.
-- **Phase 2** — branching, custom merge driver, conflict resolver UI on canvas.
+- **Phase 0** — load a `.gha`, register a placeholder component, attach canvas paint hooks. *(done)*
+- **Phase 1** — canonical JSON serializer over `GH_IO`; commit / log / restore via the system `git` CLI; panel UI; canvas overlay paints add/remove/modify diff against HEAD. *(commit/log/restore + panel done; persistent value capture + canvas overlay pending)*
+- **Phase 2** — branching, push/pull/fetch, custom merge driver, conflict resolver UI on canvas.
 - **Phase 3** — remotes, LFS for embedded geometry, auto-commit on save.
 - **Phase 4** — Yak distribution, signed/notarized macOS bundle.
 
