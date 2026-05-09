@@ -300,8 +300,13 @@ public sealed class GBimPanel : Panel
 
             var ghBase = Path.GetFileNameWithoutExtension(s.FilePath);
             var jsonFull = s.CanonicalJsonFullPath!;
+            var ghRel = Path.GetRelativePath(s.RepoPath, s.FilePath);
             var jsonRel = Path.GetRelativePath(s.RepoPath, jsonFull);
-            var nextV = CommitVersioning.NextVersion(s.RepoPath, jsonRel);
+            // Count commits touching either file. JSON-only would miss
+            // slider-only commits (Phase 1a serializer is structural-only,
+            // so those commits don't touch the JSON), causing the message
+            // to repeat a previous version number.
+            var nextV = CommitVersioning.NextVersion(s.RepoPath, ghRel, jsonRel);
             var msg = CommitVersioning.FormatMessage(ghBase, nextV);
 
             var sha = GBimRepository.Commit(
