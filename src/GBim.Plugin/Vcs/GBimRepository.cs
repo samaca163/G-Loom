@@ -70,13 +70,28 @@ public static class GBimRepository
         return sha.ExitCode == 0 ? sha.StdOut.Trim() : null;
     }
 
-    public static IReadOnlyList<CommitInfo> Log(string repoRoot, int limit)
+    /// <summary>
+    /// Returns up to <paramref name="limit"/> recent commits. If
+    /// <paramref name="repoRelativeFiles"/> is non-null, only commits that
+    /// touched any of those files are returned (prevents cross-file
+    /// pollution when several .gh definitions share one repo).
+    /// </summary>
+    public static IReadOnlyList<CommitInfo> Log(
+        string repoRoot,
+        int limit,
+        IEnumerable<string>? repoRelativeFiles = null)
     {
         if (!IsRepo(repoRoot)) return Array.Empty<CommitInfo>();
         if (limit <= 0) limit = 10;
 
         var fmt = $"%H{FieldSep}%an{FieldSep}%aI{FieldSep}%s{RecordSep}";
-        var result = Run(repoRoot, "log", $"-n{limit}", $"--pretty=format:{fmt}");
+        var args = new List<string> { "log", $"-n{limit}", $"--pretty=format:{fmt}" };
+        if (repoRelativeFiles is not null)
+        {
+            args.Add("--");
+            foreach (var f in repoRelativeFiles) args.Add(f.Replace('\\', '/'));
+        }
+        var result = Run(repoRoot, args.ToArray());
         if (result.ExitCode != 0) return Array.Empty<CommitInfo>();
 
         var list = new List<CommitInfo>();
@@ -90,7 +105,15 @@ public static class GBimRepository
         return list;
     }
 
-    public static RepoStatus GetStatus(string repoRoot)
+    /// <summary>
+    /// Branch is always the repo-wide current branch. <c>LastCommit</c> is the
+    /// most recent commit touching <paramref name="repoRelativeFiles"/> when
+    /// supplied (so multi-file repos don't show another file's commit as
+    /// "last"); otherwise the repo's HEAD commit.
+    /// </summary>
+    public static RepoStatus GetStatus(
+        string repoRoot,
+        IEnumerable<string>? repoRelativeFiles = null)
     {
         if (!IsRepo(repoRoot))
             return new RepoStatus("(no repo)", null);
@@ -99,8 +122,16 @@ public static class GBimRepository
         var branchName = branch.ExitCode == 0 ? branch.StdOut.Trim() : "(detached)";
         if (branchName == "HEAD") branchName = "(detached)";
 
-        var head = Run(repoRoot, "log", "-1",
-            $"--pretty=format:%H{FieldSep}%an{FieldSep}%aI{FieldSep}%s");
+        var args = new List<string>
+        {
+            "log", "-1", $"--pretty=format:%H{FieldSep}%an{FieldSep}%aI{FieldSep}%s",
+        };
+        if (repoRelativeFiles is not null)
+        {
+            args.Add("--");
+            foreach (var f in repoRelativeFiles) args.Add(f.Replace('\\', '/'));
+        }
+        var head = Run(repoRoot, args.ToArray());
 
         CommitInfo? last = null;
         if (head.ExitCode == 0 && !string.IsNullOrWhiteSpace(head.StdOut))

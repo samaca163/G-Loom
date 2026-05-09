@@ -157,19 +157,23 @@ public sealed class GBimPanel : Panel
             _filePathLabel.Text = s.FilePath;
             _repoLabel.Text = s.RepoPath;
 
-            var status = GBimRepository.GetStatus(s.RepoPath);
+            var ghBase = Path.GetFileNameWithoutExtension(s.FilePath);
+            var ghRel = Path.GetRelativePath(s.RepoPath, s.FilePath);
+            var jsonRel = Path.GetRelativePath(s.RepoPath, s.CanonicalJsonFullPath!);
+            var fileScope = new[] { ghRel, jsonRel };
+
+            // Branch is repo-wide; "last commit" is filtered to this file's pair
+            // so multi-file repos don't bleed another file's commit into the panel.
+            var status = GBimRepository.GetStatus(s.RepoPath, fileScope);
             _branchLabel.Text = status.Branch;
             _lastCommitLabel.Text = status.LastCommit is null
                 ? "(no commits yet)"
                 : $"{status.LastCommit.Sha[..7]}  {status.LastCommit.Message}";
 
-            // Resolve "current" SHA: explicit restore wins, else HEAD's tip.
+            // Resolve "current" SHA: explicit restore wins, else this-file's HEAD.
             var currentSha = s.CurrentRestoredSha ?? status.LastCommit?.Sha;
-            _currentVersionLabel.Text = ResolveCurrentVersionLabel(s, currentSha);
+            _currentVersionLabel.Text = ResolveCurrentVersionLabel(s, currentSha, fileScope);
 
-            var ghBase = Path.GetFileNameWithoutExtension(s.FilePath);
-            var jsonRel = Path.GetRelativePath(s.RepoPath, s.CanonicalJsonFullPath!);
-            var ghRel = Path.GetRelativePath(s.RepoPath, s.FilePath);
             var nextV = CommitVersioning.NextVersion(s.RepoPath, ghRel, jsonRel);
             _nextVersionLabel.Text = CommitVersioning.FormatMessage(ghBase, nextV);
 
@@ -178,7 +182,7 @@ public sealed class GBimPanel : Panel
                 : "clean";
             _commitButton.Enabled = true;
 
-            RefreshHistory(s, currentSha);
+            RefreshHistory(s, currentSha, fileScope);
         }
         catch (Exception ex)
         {
@@ -190,14 +194,14 @@ public sealed class GBimPanel : Panel
         }
     }
 
-    private string ResolveCurrentVersionLabel(TrackedState s, string? currentSha)
+    private string ResolveCurrentVersionLabel(TrackedState s, string? currentSha, IReadOnlyList<string> fileScope)
     {
         if (currentSha is null) return "(not committed yet)";
 
-        // Find the commit's message via a one-shot lookup. (Cheaper than rescanning Log.)
-        // Use git log --pretty=format:%s -1 <sha>.
-        // For simplicity we just scan the most recent N commits and match.
-        var recent = GBimRepository.Log(s.RepoPath!, Math.Max(_historyLimit, 50));
+        // Scan a window of this-file commits and look for the SHA. Cheaper than
+        // a separate `git log -1 <sha>` round-trip and good enough since the
+        // current commit is by definition recent in *this file's* history.
+        var recent = GBimRepository.Log(s.RepoPath!, Math.Max(_historyLimit, 50), fileScope);
         foreach (var c in recent)
             if (c.Sha == currentSha)
                 return CommitVersioning.ExtractVersionLabel(c.Message)
@@ -206,11 +210,11 @@ public sealed class GBimPanel : Panel
         return currentSha[..7];
     }
 
-    private void RefreshHistory(TrackedState s, string? currentSha)
+    private void RefreshHistory(TrackedState s, string? currentSha, IReadOnlyList<string> fileScope)
     {
         if (s.RepoPath is null || s.FilePath is null) { _historyContainer.Items.Clear(); _showMoreButton.Visible = false; return; }
 
-        var commits = GBimRepository.Log(s.RepoPath, _historyLimit);
+        var commits = GBimRepository.Log(s.RepoPath, _historyLimit, fileScope);
 
         // Restore is allowed unless the user has UNSAVED canvas edits in the
         // active document. We deliberately do NOT use `git diff` here:
