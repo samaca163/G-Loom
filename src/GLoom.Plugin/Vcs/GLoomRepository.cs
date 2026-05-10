@@ -19,7 +19,7 @@ public static class GLoomRepository
     public sealed record RepoStatus(string Branch, CommitInfo? LastCommit);
     public sealed record BranchInfo(string Name, bool IsCurrent);
     public sealed record ForkPoint(string ParentBranch, string ForkSha);
-    public sealed record TagInfo(string Name, string Sha);
+    public sealed record TagInfo(string Name, string Sha, string? Message);
 
     // ASCII control codes - extremely unlikely to appear in commit messages or
     // author fields - used as field/record delimiters in `git log` output so we
@@ -347,30 +347,35 @@ public static class GLoomRepository
     // ------------------------------------------------------------------
 
     /// <summary>
-    /// Lists every tag in the repo with the commit SHA it points at.
-    /// Resolves annotated tags through the tag object via %(*objectname);
-    /// for lightweight tags %(objectname) already is the commit SHA, so we
-    /// fall back to it when %(*objectname) is empty.
+    /// Lists every tag in the repo with the commit SHA it points at and the
+    /// raw message body for annotated tags. Resolves annotated tags through
+    /// the tag object via %(*objectname); for lightweight tags
+    /// %(objectname) already is the commit SHA, so we fall back to it when
+    /// %(*objectname) is empty. %(contents) carries the full annotated tag
+    /// body (multi-line, possibly JSON) and is empty for lightweight tags.
+    /// We split records on RecordSep instead of newline because the
+    /// contents field may contain its own newlines.
     /// </summary>
     public static IReadOnlyList<TagInfo> GetTags(string repoRoot)
     {
         if (!IsRepo(repoRoot)) return Array.Empty<TagInfo>();
 
-        var fmt = $"%(refname:short){FieldSep}%(objectname){FieldSep}%(*objectname)";
+        var fmt = $"%(refname:short){FieldSep}%(objectname){FieldSep}%(*objectname){FieldSep}%(contents){RecordSep}";
         var result = Run(repoRoot, "for-each-ref", "refs/tags/", $"--format={fmt}");
         if (result.ExitCode != 0) return Array.Empty<TagInfo>();
 
         var list = new List<TagInfo>();
-        foreach (var line in result.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        foreach (var rec in result.StdOut.Split(RecordSep, StringSplitOptions.RemoveEmptyEntries))
         {
-            var parts = line.TrimEnd('\r').Split(FieldSep);
+            var parts = rec.TrimStart('\n', '\r').Split(FieldSep);
             if (parts.Length < 2) continue;
             var name = parts[0].Trim();
             var sha = parts.Length >= 3 && !string.IsNullOrWhiteSpace(parts[2])
                 ? parts[2].Trim()
                 : parts[1].Trim();
+            var msg = parts.Length >= 4 ? parts[3].Trim('\n', '\r', ' ') : null;
             if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(sha)) continue;
-            list.Add(new TagInfo(name, sha));
+            list.Add(new TagInfo(name, sha, string.IsNullOrEmpty(msg) ? null : msg));
         }
         return list;
     }
@@ -388,6 +393,32 @@ public static class GLoomRepository
         if (result.ExitCode != 0)
             throw new InvalidOperationException(
                 $"git tag {tagName} {commitSha} failed (exit {result.ExitCode}): {result.StdErr.Trim()}");
+    }
+
+    /// <summary>
+    /// Creates an annotated tag with the given message and tagger info.
+    /// We use this for G-Loom tags so the toolchain metadata JSON travels
+    /// inside the tag object itself - no working-tree pollution, survives
+    /// `git push --tags` cleanly.
+    /// </summary>
+    public static void CreateAnnotatedTag(
+        string repoRoot,
+        string tagName,
+        string commitSha,
+        string message,
+        string taggerName,
+        string taggerEmail)
+    {
+        if (!IsRepo(repoRoot))
+            throw new InvalidOperationException($"{repoRoot} is not a Git repo.");
+
+        var result = Run(repoRoot,
+            "-c", $"user.name={taggerName}",
+            "-c", $"user.email={taggerEmail}",
+            "tag", "-a", tagName, commitSha, "-m", message);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException(
+                $"git tag -a {tagName} {commitSha} failed (exit {result.ExitCode}): {result.StdErr.Trim()}");
     }
 
     public static void DeleteTag(string repoRoot, string tagName)

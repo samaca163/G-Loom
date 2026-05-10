@@ -243,20 +243,21 @@ public sealed class GLoomPanel : Panel
             list.Add(fp.ParentBranch);
         }
 
-        // Tags are repo-wide; we group by SHA and only render chips on
-        // commits the file-scoped history actually surfaces.
+        // Tags are repo-wide; we group by SHA and only render in drawers
+        // for commits the file-scoped history actually surfaces.
         var tags = GLoomRepository.GetTags(s.RepoPath);
-        var tagsBySha = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        var tagsBySha = new Dictionary<string, List<GLoomRepository.TagInfo>>(StringComparer.Ordinal);
         foreach (var t in tags)
         {
             if (!tagsBySha.TryGetValue(t.Sha, out var list))
             {
-                list = new List<string>();
+                list = new List<GLoomRepository.TagInfo>();
                 tagsBySha[t.Sha] = list;
             }
-            list.Add(t.Name);
+            list.Add(t);
         }
-        foreach (var list in tagsBySha.Values) list.Sort(StringComparer.Ordinal);
+        foreach (var list in tagsBySha.Values)
+            list.Sort((a, b) => StringComparer.Ordinal.Compare(a.Name, b.Name));
 
         var visibleShas = new HashSet<string>(StringComparer.Ordinal);
         _historyContainer.Items.Clear();
@@ -560,7 +561,22 @@ public sealed class GLoomPanel : Panel
 
         try
         {
-            GLoomRepository.CreateTag(s.RepoPath, trimmed, commitSha);
+            // Annotated tag with toolchain metadata embedded as JSON in the
+            // tag message. Captures Rhino/GH/RiR/G-Loom versions at this
+            // moment so a future restore knows which runtime produced this
+            // recipe state - critical for decade-horizon reproducibility.
+            var metadata = new TagMetadata(
+                SchemaVersion: 1,
+                TagName: trimmed,
+                CommitSha: commitSha,
+                CreatedAt: DateTimeOffset.UtcNow,
+                CreatedBy: "iSamacA",
+                Toolchain: ToolchainSnapshot.Capture());
+            var json = TagMetadataJson.Write(metadata);
+
+            GLoomRepository.CreateAnnotatedTag(
+                s.RepoPath, trimmed, commitSha, json,
+                taggerName: "iSamacA", taggerEmail: "samaca163@gmail.com");
             RhinoApp.WriteLine($"[G-Loom] Tagged {sha7} as '{trimmed}'.");
             DocumentTracker.Instance.Refresh();
             Refresh();
@@ -732,7 +748,7 @@ public sealed class GLoomPanel : Panel
             GLoomRepository.CommitInfo info,
             bool isCurrent,
             IReadOnlyList<string>? forkParents,
-            IReadOnlyList<string>? tags,
+            IReadOnlyList<GLoomRepository.TagInfo>? tags,
             bool initiallyExpanded,
             Action onRestore,
             Action onCreateTag,
@@ -810,7 +826,7 @@ public sealed class GLoomPanel : Panel
         }
 
         private static Panel BuildDetailsPanel(
-            IReadOnlyList<string>? tags,
+            IReadOnlyList<GLoomRepository.TagInfo>? tags,
             Action onCreateTag,
             Action<string> onDeleteTag)
         {
@@ -832,29 +848,7 @@ public sealed class GLoomPanel : Panel
             if (tags is { Count: > 0 })
             {
                 foreach (var t in tags)
-                {
-                    var name = t;
-                    var nameLabel = new Label { Text = name };
-                    var deleteBtn = new Button
-                    {
-                        Text = "×",
-                        ToolTip = $"Delete tag '{name}'",
-                        Size = new Size(22, 22),
-                    };
-                    deleteBtn.Click += (_, _) => onDeleteTag(name);
-
-                    var row = new TableLayout
-                    {
-                        Spacing = new Size(6, 0),
-                        Rows =
-                        {
-                            new TableRow(
-                                new TableCell(nameLabel, true),
-                                new TableCell(deleteBtn, false)),
-                        },
-                    };
-                    stack.Items.Add(row);
-                }
+                    stack.Items.Add(BuildTagBlock(t, onDeleteTag));
             }
             else
             {
@@ -871,5 +865,74 @@ public sealed class GLoomPanel : Panel
 
             return new Panel { Content = stack };
         }
+
+        private static StackLayout BuildTagBlock(
+            GLoomRepository.TagInfo tag,
+            Action<string> onDeleteTag)
+        {
+            var name = tag.Name;
+            var nameLabel = new Label
+            {
+                Text = name,
+                Font = new Font(SystemFont.Bold, 10),
+            };
+            var deleteBtn = new Button
+            {
+                Text = "×",
+                ToolTip = $"Delete tag '{name}'",
+                Size = new Size(22, 22),
+            };
+            deleteBtn.Click += (_, _) => onDeleteTag(name);
+
+            var headerRow = new TableLayout
+            {
+                Spacing = new Size(6, 0),
+                Rows =
+                {
+                    new TableRow(
+                        new TableCell(nameLabel, true),
+                        new TableCell(deleteBtn, false)),
+                },
+            };
+
+            var block = new StackLayout
+            {
+                Orientation = Orientation.Vertical,
+                Spacing = 1,
+                Padding = new Padding(0, 2, 0, 4),
+            };
+            block.Items.Add(headerRow);
+
+            var meta = TagMetadataJson.TryRead(tag.Message);
+            if (meta is not null)
+            {
+                block.Items.Add(MetaLine(
+                    $"Captured {meta.CreatedAt.ToLocalTime():yyyy-MM-dd HH:mm} by {meta.CreatedBy}"));
+                var tc = meta.Toolchain;
+                var parts = new System.Collections.Generic.List<string>
+                {
+                    $"Rhino {tc.Rhino}",
+                    $"GH {tc.Grasshopper}",
+                };
+                if (!string.IsNullOrEmpty(tc.RhinoInsideRevit))
+                    parts.Add($"RiR {tc.RhinoInsideRevit}");
+                parts.Add($"G-Loom {tc.Gloom}");
+                block.Items.Add(MetaLine(string.Join("  ·  ", parts)));
+            }
+            else
+            {
+                block.Items.Add(MetaLine("(no toolchain metadata captured)"));
+            }
+
+            return block;
+        }
+
+        private static Label MetaLine(string text) => new()
+        {
+            Text = text,
+            Font = new Font(SystemFont.Default, 9),
+            TextColor = Color.FromGrayscale(0.5f),
+            Wrap = WrapMode.Word,
+        };
     }
 }
