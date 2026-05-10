@@ -24,4 +24,24 @@ public static class CanonicalJson
 
     public static string Write(CanonicalDocument doc) =>
         JsonSerializer.Serialize(doc, Options);
+
+    /// <summary>
+    /// Best-effort parse of a canonical JSON blob (e.g. read via
+    /// `git show &lt;sha&gt;:&lt;path&gt;`). Returns null for empty input or
+    /// malformed JSON; the caller decides how to fall back. Schema v1
+    /// blobs deserialize cleanly into v2 records because the new
+    /// optional fields default to null.
+    /// </summary>
+    public static CanonicalDocument? TryParse(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            return JsonSerializer.Deserialize<CanonicalDocument>(json, Options);
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }
