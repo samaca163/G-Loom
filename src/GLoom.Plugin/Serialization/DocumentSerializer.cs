@@ -2,20 +2,25 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using GH_IO.Serialization;
 using Grasshopper.Kernel;
 using Grasshopper.Kernel.Special;
+using Grasshopper.Kernel.Types;
 
 namespace GLoom.Serialization;
 
 /// <summary>
 /// Walks a live <see cref="GH_Document"/> and emits a <see cref="CanonicalDocument"/>.
-/// Phase 1a: structural only - components, parameters, wires (via param sources),
-/// groups. Persistent data (slider values, panel text, internalised geometry) is
-/// out of scope and will land in Phase 1b.
+/// Phase 1b extends the structural pass with persistent value capture for the
+/// free-floating params people actually iterate on (sliders, panels, booleans,
+/// value lists, color swatches, MD sliders, gradients), plus a SHA-256 digest
+/// fallback for params holding internalized data we don't structurally model.
 /// </summary>
 public static class DocumentSerializer
 {
-    private const int CurrentSchemaVersion = 1;
+    private const int CurrentSchemaVersion = 2;
 
     public static CanonicalDocument Serialize(GH_Document document)
     {
@@ -99,7 +104,115 @@ public static class DocumentSerializer
             Nickname: NullSafe(param.NickName),
             Pivot: ExtractPivot(param),
             Inputs: new[] { syntheticInput },
-            Outputs: Array.Empty<CanonicalParameter>());
+            Outputs: Array.Empty<CanonicalParameter>(),
+            Persistent: CapturePersistent(param));
+    }
+
+    /// <summary>
+    /// Captures the user-tweakable state of a free-floating param. Returns
+    /// null when the param has no persistent state worth recording (no
+    /// match against the typed handlers AND no internalized data).
+    ///
+    /// Special-cased kinds get structured representations so the diff can
+    /// say "slider went from 5 to 10" rather than "opaque blob changed".
+    /// Anything we don't have a typed handler for falls back to a
+    /// SHA-256 digest of the param's GH-serialized form when it carries
+    /// internalized data; that's enough to detect change without trying
+    /// to render it.
+    /// </summary>
+    private static PersistentData? CapturePersistent(IGH_Param param)
+    {
+        switch (param)
+        {
+            case GH_NumberSlider slider:
+                return new PersistentData(
+                    Kind: "slider",
+                    Slider: new SliderValue(
+                        Value: slider.CurrentValue,
+                        Min: slider.Slider.Minimum,
+                        Max: slider.Slider.Maximum,
+                        Decimals: slider.Slider.DecimalPlaces,
+                        Type: slider.Slider.Type.ToString()));
+
+            case GH_Panel panel:
+                return new PersistentData(
+                    Kind: "panel",
+                    PanelText: NullSafe(panel.UserText));
+
+            case GH_BooleanToggle toggle:
+                return new PersistentData(
+                    Kind: "boolean",
+                    BooleanState: toggle.Value);
+
+            case GH_ValueList valueList:
+                {
+                    var items = valueList.SelectedItems ?? new List<GH_ValueListItem>();
+                    var selected = items
+                        .Select(i => i.Name ?? string.Empty)
+                        .OrderBy(s => s, StringComparer.Ordinal)
+                        .ToList();
+                    return new PersistentData(
+                        Kind: "valuelist",
+                        ValueListSelected: selected);
+                }
+
+            case GH_ColourSwatch swatch:
+                return new PersistentData(
+                    Kind: "color",
+                    ColorArgb: swatch.SwatchColour.ToArgb().ToString("X8"));
+        }
+
+        // Generic fallback for any persistent-typed param holding
+        // internalized data (MD slider, gradient, baked geometry on a
+        // Curve param, etc.). PersistentDataCount lives on the generic
+        // GH_PersistentParam<T>; rather than reflect across all the typed
+        // variants, we ask via dynamic and treat zero/exception as
+        // "nothing to capture".
+        var count = TryGetPersistentDataCount(param);
+        if (count > 0)
+        {
+            return new PersistentData(
+                Kind: "data",
+                Digest: ComputeParamDigest(param));
+        }
+
+        return null;
+    }
+
+    private static int TryGetPersistentDataCount(IGH_Param param)
+    {
+        try
+        {
+            dynamic dyn = param;
+            return (int)dyn.PersistentDataCount;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// SHA-256 of the param's full GH XML serialization. Includes more than
+    /// just the persistent data (the param's own attributes ride along too)
+    /// but for diff purposes that's acceptable: structural fields are
+    /// captured separately, so a digest mismatch on a structurally-stable
+    /// param means the persistent payload moved.
+    /// </summary>
+    private static string ComputeParamDigest(IGH_Param param)
+    {
+        try
+        {
+            var chunk = new GH_LooseChunk("Persistent");
+            param.Write(chunk);
+            var bytes = Encoding.UTF8.GetBytes(chunk.Serialize_Xml());
+            var hash = SHA256.HashData(bytes);
+            return Convert.ToHexString(hash);
+        }
+        catch
+        {
+            return "unknown";
+        }
     }
 
     private static CanonicalParameter SerializeParam(IGH_Param param)
