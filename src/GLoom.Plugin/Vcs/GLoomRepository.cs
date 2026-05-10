@@ -541,6 +541,20 @@ public static class GLoomRepository
     }
 
     /// <summary>
+    /// Reads the contents of a file as it existed at <paramref name="commitSha"/>
+    /// via `git show &lt;sha&gt;:&lt;path&gt;`. Returns null when git fails (file
+    /// didn't exist at that commit, repo not initialised, bad path, etc.) -
+    /// the caller decides how to fall back rather than throwing for a miss.
+    /// </summary>
+    public static string? ReadFileAtCommit(string repoRoot, string commitSha, string repoRelativePath)
+    {
+        if (!IsRepo(repoRoot)) return null;
+        var path = repoRelativePath.Replace('\\', '/');
+        var result = Run(repoRoot, "show", $"{commitSha}:{path}");
+        return result.ExitCode == 0 ? result.StdOut : null;
+    }
+
+    /// <summary>
     /// Restores the given files at the given commit by running
     /// `git checkout &lt;sha&gt; -- &lt;files...&gt;`. Throws if git fails.
     /// </summary>
