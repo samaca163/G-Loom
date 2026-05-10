@@ -14,6 +14,7 @@ using Rhino;
 using Application = Eto.Forms.Application;
 using Button = Eto.Forms.Button;
 using ButtonMenuItem = Eto.Forms.ButtonMenuItem;
+using Color = Eto.Drawing.Color;
 using ContextMenu = Eto.Forms.ContextMenu;
 using Control = Eto.Forms.Control;
 using DialogResult = Eto.Forms.DialogResult;
@@ -191,7 +192,7 @@ public sealed class GLoomPanel : Panel
                 : "clean";
             _commitButton.Enabled = true;
 
-            RefreshHistory(s, currentSha, fileScope);
+            RefreshHistory(s, currentSha, fileScope, status.Branch);
         }
         catch (Exception ex)
         {
@@ -219,19 +220,35 @@ public sealed class GLoomPanel : Panel
         return currentSha[..7];
     }
 
-    private void RefreshHistory(TrackedState s, string? currentSha, IReadOnlyList<string> fileScope)
+    private void RefreshHistory(TrackedState s, string? currentSha, IReadOnlyList<string> fileScope, string branchName)
     {
         if (s.RepoPath is null || s.FilePath is null) { _historyContainer.Items.Clear(); _showMoreButton.Visible = false; return; }
 
         var commits = GLoomRepository.Log(s.RepoPath, _historyLimit, fileScope);
 
+        // Fork-point markers: where the current branch diverged from
+        // (a) the default branch and (b) the closest other local branch.
+        var forks = GLoomRepository.GetForkPoints(s.RepoPath, branchName);
+        var forksBySha = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var fp in forks)
+        {
+            if (!forksBySha.TryGetValue(fp.ForkSha, out var list))
+            {
+                list = new List<string>();
+                forksBySha[fp.ForkSha] = list;
+            }
+            list.Add(fp.ParentBranch);
+        }
+
         _historyContainer.Items.Clear();
         foreach (var c in commits)
         {
             var isCurrent = currentSha is not null && c.Sha == currentSha;
+            forksBySha.TryGetValue(c.Sha, out var parents);
             var row = new CommitRow(
                 info: c,
                 isCurrent: isCurrent,
+                forkParents: parents,
                 onRestore: () => OnRestoreClicked(c.Sha, c.Message));
             _historyContainer.Items.Add(new StackLayoutItem(row, HorizontalAlignment.Stretch));
         }
@@ -624,6 +641,7 @@ public sealed class GLoomPanel : Panel
         public CommitRow(
             GLoomRepository.CommitInfo info,
             bool isCurrent,
+            IReadOnlyList<string>? forkParents,
             Action onRestore)
         {
             var version = CommitVersioning.ExtractVersionLabel(info.Message) ?? "—";
@@ -645,8 +663,7 @@ public sealed class GLoomPanel : Panel
             };
             restoreBtn.Click += (_, _) => onRestore();
 
-            Padding = new Padding(12, 4, 12, 4);
-            Content = new TableLayout
+            var mainRow = new TableLayout
             {
                 Spacing = new Size(8, 0),
                 Rows =
@@ -659,6 +676,27 @@ public sealed class GLoomPanel : Panel
                         new TableCell(restoreBtn, false)),
                 },
             };
+
+            Padding = new Padding(12, 4, 12, 4);
+
+            if (forkParents is { Count: > 0 })
+            {
+                var badge = new Label
+                {
+                    Text = "↰ branched from " + string.Join(" · ", forkParents),
+                    Font = new Font(SystemFont.Default, 9),
+                    TextColor = Color.FromGrayscale(0.5f),
+                };
+                Content = new TableLayout
+                {
+                    Spacing = new Size(0, 2),
+                    Rows = { new TableRow(badge), new TableRow(mainRow) },
+                };
+            }
+            else
+            {
+                Content = mainRow;
+            }
         }
     }
 }
