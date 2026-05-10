@@ -25,6 +25,8 @@ using Label = Eto.Forms.Label;
 using MessageBox = Eto.Forms.MessageBox;
 using MessageBoxButtons = Eto.Forms.MessageBoxButtons;
 using MessageBoxType = Eto.Forms.MessageBoxType;
+using MouseButtons = Eto.Forms.MouseButtons;
+using Orientation = Eto.Forms.Orientation;
 using Padding = Eto.Drawing.Padding;
 using Panel = Eto.Forms.Panel;
 using Scrollable = Eto.Forms.Scrollable;
@@ -64,6 +66,7 @@ public sealed class GLoomPanel : Panel
     private readonly StackLayout _historyContainer = new() { Orientation = Eto.Forms.Orientation.Vertical, Spacing = 0 };
     private readonly Button _showMoreButton;
     private int _historyLimit = DefaultHistoryLimit;
+    private readonly HashSet<string> _expandedShas = new(StringComparer.Ordinal);
 
     public GLoomPanel()
     {
@@ -240,18 +243,49 @@ public sealed class GLoomPanel : Panel
             list.Add(fp.ParentBranch);
         }
 
+        // Tags are repo-wide; we group by SHA and only render chips on
+        // commits the file-scoped history actually surfaces.
+        var tags = GLoomRepository.GetTags(s.RepoPath);
+        var tagsBySha = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var t in tags)
+        {
+            if (!tagsBySha.TryGetValue(t.Sha, out var list))
+            {
+                list = new List<string>();
+                tagsBySha[t.Sha] = list;
+            }
+            list.Add(t.Name);
+        }
+        foreach (var list in tagsBySha.Values) list.Sort(StringComparer.Ordinal);
+
+        var visibleShas = new HashSet<string>(StringComparer.Ordinal);
         _historyContainer.Items.Clear();
         foreach (var c in commits)
         {
+            visibleShas.Add(c.Sha);
             var isCurrent = currentSha is not null && c.Sha == currentSha;
             forksBySha.TryGetValue(c.Sha, out var parents);
+            tagsBySha.TryGetValue(c.Sha, out var rowTags);
+            var sha = c.Sha;
             var row = new CommitRow(
                 info: c,
                 isCurrent: isCurrent,
                 forkParents: parents,
-                onRestore: () => OnRestoreClicked(c.Sha, c.Message));
+                tags: rowTags,
+                initiallyExpanded: _expandedShas.Contains(sha),
+                onRestore: () => OnRestoreClicked(sha, c.Message),
+                onCreateTag: () => OnCreateTagClicked(sha, c.Message),
+                onDeleteTag: name => OnDeleteTagClicked(name),
+                onExpansionChanged: expanded =>
+                {
+                    if (expanded) _expandedShas.Add(sha);
+                    else _expandedShas.Remove(sha);
+                });
             _historyContainer.Items.Add(new StackLayoutItem(row, HorizontalAlignment.Stretch));
         }
+        // Drop expansion state for commits that no longer appear in the
+        // visible window so the set doesn't grow unbounded.
+        _expandedShas.RemoveWhere(s => !visibleShas.Contains(s));
 
         _historyHeaderLabel.Text = commits.Count == 0
             ? "History (no commits yet)"
@@ -508,6 +542,62 @@ public sealed class GLoomPanel : Panel
         }
     }
 
+    // ---- tag handlers ------------------------------------------------
+
+    private void OnCreateTagClicked(string commitSha, string commitMessage)
+    {
+        var s = DocumentTracker.Instance.State;
+        if (s.RepoPath is null) return;
+
+        var sha7 = commitSha[..7];
+        var name = string.Empty;
+        var ok = Rhino.UI.Dialogs.ShowEditBox(
+            "G-Loom: Tag commit",
+            $"Tag name for {sha7} ({commitMessage}):",
+            string.Empty, false, out name);
+        if (!ok || string.IsNullOrWhiteSpace(name)) return;
+        var trimmed = name.Trim();
+
+        try
+        {
+            GLoomRepository.CreateTag(s.RepoPath, trimmed, commitSha);
+            RhinoApp.WriteLine($"[G-Loom] Tagged {sha7} as '{trimmed}'.");
+            DocumentTracker.Instance.Refresh();
+            Refresh();
+        }
+        catch (Exception ex)
+        {
+            RhinoApp.WriteLine($"[G-Loom] Tag failed: {ex.Message}");
+            MessageBox.Show($"Tag failed:\n\n{ex.Message}",
+                "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
+        }
+    }
+
+    private void OnDeleteTagClicked(string tagName)
+    {
+        var s = DocumentTracker.Instance.State;
+        if (s.RepoPath is null) return;
+
+        var prompt = $"Delete tag '{tagName}'?\n\nThis cannot be undone.";
+        var result = MessageBox.Show(prompt, "G-Loom: Delete tag",
+            MessageBoxButtons.OKCancel, MessageBoxType.Warning);
+        if (result != DialogResult.Ok) return;
+
+        try
+        {
+            GLoomRepository.DeleteTag(s.RepoPath, tagName);
+            RhinoApp.WriteLine($"[G-Loom] Deleted tag '{tagName}'.");
+            DocumentTracker.Instance.Refresh();
+            Refresh();
+        }
+        catch (Exception ex)
+        {
+            RhinoApp.WriteLine($"[G-Loom] Tag delete failed: {ex.Message}");
+            MessageBox.Show($"Tag delete failed:\n\n{ex.Message}",
+                "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
+        }
+    }
+
     // ---- commit handler ----------------------------------------------
 
     private void OnCommitClicked()
@@ -642,7 +732,12 @@ public sealed class GLoomPanel : Panel
             GLoomRepository.CommitInfo info,
             bool isCurrent,
             IReadOnlyList<string>? forkParents,
-            Action onRestore)
+            IReadOnlyList<string>? tags,
+            bool initiallyExpanded,
+            Action onRestore,
+            Action onCreateTag,
+            Action<string> onDeleteTag,
+            Action<bool> onExpansionChanged)
         {
             var version = CommitVersioning.ExtractVersionLabel(info.Message) ?? "—";
             var sha7 = info.Sha[..7];
@@ -658,10 +753,28 @@ public sealed class GLoomPanel : Panel
             var dateLabel = new Label { Text = date };
             var restoreBtn = new Button
             {
-                Text = "Restore",
+                Text = "↺",
                 ToolTip = "Restore this version to the working tree",
+                Size = new Size(26, 26),
             };
             restoreBtn.Click += (_, _) => onRestore();
+
+            var details = BuildDetailsPanel(tags, onCreateTag, onDeleteTag);
+            details.Visible = initiallyExpanded;
+
+            var toggleBtn = new Button
+            {
+                Text = initiallyExpanded ? "▴" : "▾",
+                ToolTip = "Show commit details (tags, metadata)",
+                Size = new Size(26, 26),
+            };
+            toggleBtn.Click += (_, _) =>
+            {
+                var newState = !details.Visible;
+                details.Visible = newState;
+                toggleBtn.Text = newState ? "▴" : "▾";
+                onExpansionChanged(newState);
+            };
 
             var mainRow = new TableLayout
             {
@@ -673,12 +786,14 @@ public sealed class GLoomPanel : Panel
                         new TableCell(shaLabel, false),
                         new TableCell(msgLabel, true),
                         new TableCell(dateLabel, false),
-                        new TableCell(restoreBtn, false)),
+                        new TableCell(restoreBtn, false),
+                        new TableCell(toggleBtn, false)),
                 },
             };
 
             Padding = new Padding(12, 4, 12, 4);
 
+            var rows = new TableLayout { Spacing = new Size(0, 2) };
             if (forkParents is { Count: > 0 })
             {
                 var badge = new Label
@@ -687,16 +802,74 @@ public sealed class GLoomPanel : Panel
                     Font = new Font(SystemFont.Default, 9),
                     TextColor = Color.FromGrayscale(0.5f),
                 };
-                Content = new TableLayout
+                rows.Rows.Add(new TableRow(badge));
+            }
+            rows.Rows.Add(new TableRow(mainRow));
+            rows.Rows.Add(new TableRow(details));
+            Content = rows;
+        }
+
+        private static Panel BuildDetailsPanel(
+            IReadOnlyList<string>? tags,
+            Action onCreateTag,
+            Action<string> onDeleteTag)
+        {
+            var stack = new StackLayout
+            {
+                Orientation = Orientation.Vertical,
+                Spacing = 4,
+                Padding = new Padding(20, 6, 12, 6),
+            };
+
+            var tagsHeader = new Label
+            {
+                Text = "Tags",
+                Font = new Font(SystemFont.Bold, 9),
+                TextColor = Color.FromGrayscale(0.5f),
+            };
+            stack.Items.Add(tagsHeader);
+
+            if (tags is { Count: > 0 })
+            {
+                foreach (var t in tags)
                 {
-                    Spacing = new Size(0, 2),
-                    Rows = { new TableRow(badge), new TableRow(mainRow) },
-                };
+                    var name = t;
+                    var nameLabel = new Label { Text = name };
+                    var deleteBtn = new Button
+                    {
+                        Text = "×",
+                        ToolTip = $"Delete tag '{name}'",
+                        Size = new Size(22, 22),
+                    };
+                    deleteBtn.Click += (_, _) => onDeleteTag(name);
+
+                    var row = new TableLayout
+                    {
+                        Spacing = new Size(6, 0),
+                        Rows =
+                        {
+                            new TableRow(
+                                new TableCell(nameLabel, true),
+                                new TableCell(deleteBtn, false)),
+                        },
+                    };
+                    stack.Items.Add(row);
+                }
             }
             else
             {
-                Content = mainRow;
+                stack.Items.Add(new Label
+                {
+                    Text = "(no tags yet)",
+                    TextColor = Color.FromGrayscale(0.55f),
+                });
             }
+
+            var addBtn = new Button { Text = "+ add tag" };
+            addBtn.Click += (_, _) => onCreateTag();
+            stack.Items.Add(addBtn);
+
+            return new Panel { Content = stack };
         }
     }
 }

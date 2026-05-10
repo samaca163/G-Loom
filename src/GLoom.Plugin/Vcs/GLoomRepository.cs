@@ -19,6 +19,7 @@ public static class GLoomRepository
     public sealed record RepoStatus(string Branch, CommitInfo? LastCommit);
     public sealed record BranchInfo(string Name, bool IsCurrent);
     public sealed record ForkPoint(string ParentBranch, string ForkSha);
+    public sealed record TagInfo(string Name, string Sha);
 
     // ASCII control codes - extremely unlikely to appear in commit messages or
     // author fields - used as field/record delimiters in `git log` output so we
@@ -339,6 +340,65 @@ public static class GLoomRepository
             result.Add(new ForkPoint(c.Name, c.Sha));
 
         return result;
+    }
+
+    // ------------------------------------------------------------------
+    // Tag operations
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Lists every tag in the repo with the commit SHA it points at.
+    /// Resolves annotated tags through the tag object via %(*objectname);
+    /// for lightweight tags %(objectname) already is the commit SHA, so we
+    /// fall back to it when %(*objectname) is empty.
+    /// </summary>
+    public static IReadOnlyList<TagInfo> GetTags(string repoRoot)
+    {
+        if (!IsRepo(repoRoot)) return Array.Empty<TagInfo>();
+
+        var fmt = $"%(refname:short){FieldSep}%(objectname){FieldSep}%(*objectname)";
+        var result = Run(repoRoot, "for-each-ref", "refs/tags/", $"--format={fmt}");
+        if (result.ExitCode != 0) return Array.Empty<TagInfo>();
+
+        var list = new List<TagInfo>();
+        foreach (var line in result.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var parts = line.TrimEnd('\r').Split(FieldSep);
+            if (parts.Length < 2) continue;
+            var name = parts[0].Trim();
+            var sha = parts.Length >= 3 && !string.IsNullOrWhiteSpace(parts[2])
+                ? parts[2].Trim()
+                : parts[1].Trim();
+            if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(sha)) continue;
+            list.Add(new TagInfo(name, sha));
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// Creates a lightweight tag pointing at <paramref name="commitSha"/>.
+    /// Throws if the tag name is invalid or already exists.
+    /// </summary>
+    public static void CreateTag(string repoRoot, string tagName, string commitSha)
+    {
+        if (!IsRepo(repoRoot))
+            throw new InvalidOperationException($"{repoRoot} is not a Git repo.");
+
+        var result = Run(repoRoot, "tag", tagName, commitSha);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException(
+                $"git tag {tagName} {commitSha} failed (exit {result.ExitCode}): {result.StdErr.Trim()}");
+    }
+
+    public static void DeleteTag(string repoRoot, string tagName)
+    {
+        if (!IsRepo(repoRoot))
+            throw new InvalidOperationException($"{repoRoot} is not a Git repo.");
+
+        var result = Run(repoRoot, "tag", "-d", tagName);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException(
+                $"git tag -d {tagName} failed (exit {result.ExitCode}): {result.StdErr.Trim()}");
     }
 
     /// <summary>
