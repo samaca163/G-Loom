@@ -22,7 +22,7 @@ namespace GLoom.Serialization;
 /// </summary>
 public static class DocumentSerializer
 {
-    private const int CurrentSchemaVersion = 3;
+    private const int CurrentSchemaVersion = 5;
 
     public static CanonicalDocument Serialize(GH_Document document)
     {
@@ -150,14 +150,19 @@ public static class DocumentSerializer
 
             case GH_ValueList valueList:
                 {
-                    var items = valueList.SelectedItems ?? new List<GH_ValueListItem>();
-                    var selected = items
+                    var selected = (valueList.SelectedItems ?? new List<GH_ValueListItem>())
                         .Select(i => i.Name ?? string.Empty)
                         .OrderBy(s => s, StringComparer.Ordinal)
                         .ToList();
+                    var allItems = (valueList.ListItems ?? new List<GH_ValueListItem>())
+                        .Select(i => new ValueListItem(i.Name ?? string.Empty, i.Expression ?? string.Empty))
+                        .OrderBy(i => i.Name, StringComparer.Ordinal)
+                        .ToList();
                     return new PersistentData(
                         Kind: "valuelist",
-                        ValueListSelected: selected);
+                        ValueListSelected: selected,
+                        ValueListItems: allItems,
+                        ValueListMode: valueList.ListMode.ToString());
                 }
 
             case GH_ColourSwatch swatch:
