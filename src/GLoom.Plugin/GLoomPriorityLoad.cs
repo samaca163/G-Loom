@@ -12,6 +12,7 @@ public sealed class GLoomPriorityLoad : GH_AssemblyPriority
     public override GH_LoadingInstruction PriorityLoad()
     {
         DocumentTracker.Instance.Initialize();
+        CanvasDiffOverlay.Instance.Initialize();
         GLoomPanelHost.Register();
 
         Instances.CanvasCreated += OnCanvasCreated;

@@ -14,6 +14,7 @@ using Rhino;
 using Application = Eto.Forms.Application;
 using Button = Eto.Forms.Button;
 using ButtonMenuItem = Eto.Forms.ButtonMenuItem;
+using CheckBox = Eto.Forms.CheckBox;
 using Color = Eto.Drawing.Color;
 using ContextMenu = Eto.Forms.ContextMenu;
 using Control = Eto.Forms.Control;
@@ -59,6 +60,12 @@ public sealed class GLoomPanel : Panel
     private readonly Label _dirtyLabel = NewValueLabel();
     private readonly Button _commitButton;
     private readonly Button _refreshButton;
+    private readonly CheckBox _overlayToggle = new() { Text = "Diff overlay" };
+    private readonly CheckBox _filterAdded = new() { Text = "Added", Checked = true };
+    private readonly CheckBox _filterModified = new() { Text = "Modified", Checked = true };
+    private readonly CheckBox _filterMoved = new() { Text = "Moved", Checked = true };
+    private readonly CheckBox _filterDeleted = new() { Text = "Deleted", Checked = true };
+    private readonly Button _hoverModeButton = new() { Text = "Hover for details: OFF" };
     private ContextMenu? _branchMenu;
 
     // History list
@@ -87,6 +94,48 @@ public sealed class GLoomPanel : Panel
         };
         _branchButton.Click += (_, _) => _branchMenu?.Show(_branchButton);
 
+        // Two-way binding with the overlay singleton: clicking the box
+        // toggles the overlay; the overlay raising EnabledChanged
+        // (e.g. from a future shortcut) keeps the box in sync.
+        var overlay = CanvasDiffOverlay.Instance;
+        _overlayToggle.Checked = overlay.Enabled;
+        _overlayToggle.CheckedChanged += (_, _) =>
+        {
+            overlay.SetEnabled(_overlayToggle.Checked == true);
+            UpdateFilterEnabled();
+        };
+        overlay.EnabledChanged += (_, _) =>
+        {
+            try
+            {
+                Application.Instance.AsyncInvoke(() =>
+                {
+                    _overlayToggle.Checked = overlay.Enabled;
+                    UpdateFilterEnabled();
+                });
+            }
+            catch { /* not yet attached to an Eto loop */ }
+        };
+
+        // Filter checkboxes + hover toggle button drive the overlay settings.
+        _filterAdded.Checked = overlay.ShowAdded;
+        _filterModified.Checked = overlay.ShowModified;
+        _filterMoved.Checked = overlay.ShowMoved;
+        _filterDeleted.Checked = overlay.ShowDeleted;
+        _filterAdded.CheckedChanged += (_, _) => overlay.ShowAdded = _filterAdded.Checked == true;
+        _filterModified.CheckedChanged += (_, _) => overlay.ShowModified = _filterModified.Checked == true;
+        _filterMoved.CheckedChanged += (_, _) => overlay.ShowMoved = _filterMoved.Checked == true;
+        _filterDeleted.CheckedChanged += (_, _) => overlay.ShowDeleted = _filterDeleted.Checked == true;
+
+        UpdateHoverButtonText();
+        _hoverModeButton.Click += (_, _) =>
+        {
+            overlay.HoverDetailsOnly = !overlay.HoverDetailsOnly;
+            UpdateHoverButtonText();
+        };
+
+        UpdateFilterEnabled();
+
         var headerFont = new Font(SystemFont.Bold, 13);
         var sectionFont = new Font(SystemFont.Bold, 11);
         _historyHeaderLabel.Font = sectionFont;
@@ -107,6 +156,8 @@ public sealed class GLoomPanel : Panel
                 LabelRow("State:",           _dirtyLabel),
                 new TableRow(_commitButton),
                 new TableRow(_refreshButton),
+                new TableRow(_overlayToggle),
+                new TableRow(BuildOverlayFilters()),
             },
         };
 
@@ -139,6 +190,44 @@ public sealed class GLoomPanel : Panel
     // ---- helpers ------------------------------------------------------
 
     private static Label NewValueLabel() => new() { Text = "-", Wrap = WrapMode.Word };
+
+    private TableLayout BuildOverlayFilters()
+    {
+        var filterStack = new StackLayout
+        {
+            Orientation = Orientation.Vertical,
+            Spacing = 2,
+            Items = { _filterAdded, _filterModified, _filterMoved, _filterDeleted },
+        };
+
+        return new TableLayout
+        {
+            Spacing = new Size(8, 0),
+            Padding = new Padding(16, 0, 0, 0),
+            Rows =
+            {
+                new TableRow(
+                    new TableCell(filterStack, true),
+                    new TableCell(_hoverModeButton, false)),
+            },
+        };
+    }
+
+    private void UpdateHoverButtonText()
+    {
+        var on = CanvasDiffOverlay.Instance.HoverDetailsOnly;
+        _hoverModeButton.Text = on ? "Hover for details: ON" : "Hover for details: OFF";
+    }
+
+    private void UpdateFilterEnabled()
+    {
+        var on = _overlayToggle.Checked == true;
+        _filterAdded.Enabled = on;
+        _filterModified.Enabled = on;
+        _filterMoved.Enabled = on;
+        _filterDeleted.Enabled = on;
+        _hoverModeButton.Enabled = on;
+    }
 
     private static TableRow LabelRow(string caption, Control valueControl) =>
         new(new TableCell(new Label { Text = caption }, false),
