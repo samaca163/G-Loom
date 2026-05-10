@@ -18,6 +18,7 @@ public static class GLoomRepository
     public sealed record CommitInfo(string Sha, string Author, DateTimeOffset When, string Message);
     public sealed record RepoStatus(string Branch, CommitInfo? LastCommit);
     public sealed record BranchInfo(string Name, bool IsCurrent);
+    public sealed record ForkPoint(string ParentBranch, string ForkSha);
 
     // ASCII control codes - extremely unlikely to appear in commit messages or
     // author fields - used as field/record delimiters in `git log` output so we
@@ -256,6 +257,88 @@ public static class GLoomRepository
         if (result.ExitCode != 0)
             throw new InvalidOperationException(
                 $"git branch -m {oldName} {newName} failed (exit {result.ExitCode}): {result.StdErr.Trim()}");
+    }
+
+    /// <summary>
+    /// Returns the repo's default branch name, or null if it can't be
+    /// determined. Tries `origin/HEAD` first (set by `git clone`), then
+    /// falls back to a local `main` or `master` if either exists.
+    /// </summary>
+    public static string? GetDefaultBranch(string repoRoot)
+    {
+        if (!IsRepo(repoRoot)) return null;
+
+        var sym = Run(repoRoot, "symbolic-ref", "--short", "refs/remotes/origin/HEAD");
+        if (sym.ExitCode == 0)
+        {
+            var name = sym.StdOut.Trim();
+            if (name.StartsWith("origin/")) name = name["origin/".Length..];
+            if (!string.IsNullOrEmpty(name)) return name;
+        }
+
+        foreach (var candidate in new[] { "main", "master" })
+        {
+            var verify = Run(repoRoot, "show-ref", "--verify", "--quiet", $"refs/heads/{candidate}");
+            if (verify.ExitCode == 0) return candidate;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Computes fork-point markers for <paramref name="currentBranchName"/>:
+    /// up to two markers, one anchored to the default branch (main/master)
+    /// and one to the closest other branch (most recent merge-base). The two
+    /// are deduplicated when they resolve to the same commit.
+    /// </summary>
+    public static IReadOnlyList<ForkPoint> GetForkPoints(string repoRoot, string currentBranchName)
+    {
+        if (!IsRepo(repoRoot)) return Array.Empty<ForkPoint>();
+        if (string.IsNullOrEmpty(currentBranchName) || currentBranchName == "(detached)")
+            return Array.Empty<ForkPoint>();
+
+        var branches = GetBranches(repoRoot);
+        var others = new List<string>();
+        foreach (var b in branches)
+            if (b.Name != currentBranchName) others.Add(b.Name);
+        if (others.Count == 0) return Array.Empty<ForkPoint>();
+
+        var defaultBranch = GetDefaultBranch(repoRoot);
+
+        var bases = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var name in others)
+        {
+            var mb = Run(repoRoot, "merge-base", currentBranchName, name);
+            if (mb.ExitCode != 0) continue;
+            var sha = mb.StdOut.Trim();
+            if (!string.IsNullOrEmpty(sha)) bases[name] = sha;
+        }
+        if (bases.Count == 0) return Array.Empty<ForkPoint>();
+
+        var result = new List<ForkPoint>();
+        if (defaultBranch != null
+            && defaultBranch != currentBranchName
+            && bases.TryGetValue(defaultBranch, out var defSha))
+        {
+            result.Add(new ForkPoint(defaultBranch, defSha));
+        }
+
+        // Closest non-default branch by commit timestamp of its merge-base.
+        (string Name, string Sha, long Ts)? closest = null;
+        foreach (var kv in bases)
+        {
+            if (kv.Key == defaultBranch) continue;
+            var ts = Run(repoRoot, "log", "-1", "--format=%ct", kv.Value);
+            long t = 0;
+            if (ts.ExitCode == 0) long.TryParse(ts.StdOut.Trim(), out t);
+            if (closest is null || t > closest.Value.Ts)
+                closest = (kv.Key, kv.Value, t);
+        }
+
+        if (closest is { } c && !result.Exists(fp => fp.ForkSha == c.Sha))
+            result.Add(new ForkPoint(c.Name, c.Sha));
+
+        return result;
     }
 
     /// <summary>
