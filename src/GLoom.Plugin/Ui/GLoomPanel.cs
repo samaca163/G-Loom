@@ -550,34 +550,33 @@ public sealed class GLoomPanel : Panel
         var s = DocumentTracker.Instance.State;
         if (s.RepoPath is null) return;
 
-        var sha7 = commitSha[..7];
-        var name = string.Empty;
-        var ok = Rhino.UI.Dialogs.ShowEditBox(
-            "G-Loom: Tag commit",
-            $"Tag name for {sha7} ({commitMessage}):",
-            string.Empty, false, out name);
-        if (!ok || string.IsNullOrWhiteSpace(name)) return;
-        var trimmed = name.Trim();
+        var dialog = new TagCreationDialog(commitSha, commitMessage);
+        var result = dialog.ShowModal();
+        if (result is null) return;
 
+        var sha7 = commitSha[..7];
         try
         {
-            // Annotated tag with toolchain metadata embedded as JSON in the
-            // tag message. Captures Rhino/GH/RiR/G-Loom versions at this
-            // moment so a future restore knows which runtime produced this
-            // recipe state - critical for decade-horizon reproducibility.
+            // Annotated tag with metadata embedded as JSON in the message.
+            // Schema v2 covers: toolchain (always), free-text notes, and
+            // optional AEC/Product/Release sub-records the user filled in.
             var metadata = new TagMetadata(
-                SchemaVersion: 1,
-                TagName: trimmed,
+                SchemaVersion: 2,
+                TagName: result.Name,
                 CommitSha: commitSha,
                 CreatedAt: DateTimeOffset.UtcNow,
                 CreatedBy: "iSamacA",
-                Toolchain: ToolchainSnapshot.Capture());
+                Toolchain: ToolchainSnapshot.Capture(),
+                Notes: result.Notes,
+                Aec: result.Aec,
+                Product: result.Product,
+                Release: result.Release);
             var json = TagMetadataJson.Write(metadata);
 
             GLoomRepository.CreateAnnotatedTag(
-                s.RepoPath, trimmed, commitSha, json,
+                s.RepoPath, result.Name, commitSha, json,
                 taggerName: "iSamacA", taggerEmail: "samaca163@gmail.com");
-            RhinoApp.WriteLine($"[G-Loom] Tagged {sha7} as '{trimmed}'.");
+            RhinoApp.WriteLine($"[G-Loom] Tagged {sha7} as '{result.Name}'.");
             DocumentTracker.Instance.Refresh();
             Refresh();
         }
@@ -918,6 +917,33 @@ public sealed class GLoomPanel : Panel
                     parts.Add($"RiR {tc.RhinoInsideRevit}");
                 parts.Add($"G-Loom {tc.Gloom}");
                 block.Items.Add(MetaLine(string.Join("  ·  ", parts)));
+
+                if (!string.IsNullOrEmpty(meta.Notes))
+                    block.Items.Add(MetaLine($"Notes: {meta.Notes}"));
+
+                if (meta.Aec is { } aec)
+                    AppendModeBlock(block, "AEC", new[]
+                    {
+                        Field("Phase", aec.Phase),
+                        Field("Submittal", aec.Submittal),
+                        Field("Sheet set", aec.SheetSet),
+                        Field("Notes", aec.Notes),
+                    });
+
+                if (meta.Product is { } prod)
+                    AppendModeBlock(block, "Product", new[]
+                    {
+                        Field("SKU", prod.Sku),
+                        Field("Variant", prod.Variant),
+                        Field("Notes", prod.Notes),
+                    });
+
+                if (meta.Release is { } rel)
+                    AppendModeBlock(block, "Release", new[]
+                    {
+                        Field("Version", rel.Version),
+                        Field("Notes", rel.Notes),
+                    });
             }
             else
             {
@@ -925,6 +951,30 @@ public sealed class GLoomPanel : Panel
             }
 
             return block;
+        }
+
+        private static (string Label, string? Value) Field(string label, string? value) =>
+            (label, value);
+
+        private static void AppendModeBlock(
+            StackLayout parent, string title, (string Label, string? Value)[] fields)
+        {
+            var hasAny = false;
+            foreach (var f in fields) if (!string.IsNullOrEmpty(f.Value)) { hasAny = true; break; }
+            if (!hasAny) return;
+
+            var header = new Label
+            {
+                Text = title,
+                Font = new Font(SystemFont.Bold, 9),
+                TextColor = Color.FromGrayscale(0.4f),
+            };
+            parent.Items.Add(header);
+            foreach (var f in fields)
+            {
+                if (string.IsNullOrEmpty(f.Value)) continue;
+                parent.Items.Add(MetaLine($"   {f.Label}: {f.Value}"));
+            }
         }
 
         private static Label MetaLine(string text) => new()

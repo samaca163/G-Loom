@@ -1,12 +1,20 @@
 using System;
+using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace GLoom.Serialization;
 
 /// <summary>
-/// What we capture into a tag's annotated message at tag time. Schema is
-/// versioned so we can add per-mode fields (AEC submittal info, product
-/// cert, release notes) in later phases without breaking older readers.
+/// Schema v2: toolchain (always) plus an always-available free-text Notes
+/// field and three optional mode-aware sub-records. The mode sub-records
+/// are independent - a tag can carry any combination, e.g. AEC + release
+/// for a milestone that also produced a tooled output.
+///
+/// Backward compatibility: v1 messages (no Notes / Aec / Product / Release)
+/// deserialize cleanly into this record because all the new params have
+/// `= null` defaults; System.Text.Json calls the primary constructor with
+/// defaults for missing JSON properties.
 /// </summary>
 public sealed record TagMetadata(
     int SchemaVersion,
@@ -14,24 +22,51 @@ public sealed record TagMetadata(
     string CommitSha,
     DateTimeOffset CreatedAt,
     string CreatedBy,
-    Toolchain Toolchain);
+    Toolchain Toolchain,
+    string? Notes = null,
+    AecMetadata? Aec = null,
+    ProductMetadata? Product = null,
+    ReleaseMetadata? Release = null);
 
-/// <summary>
-/// Versions of the runtime that produced the tagged recipe. The point is
-/// decade-horizon recoverability: in 2032 a reader needs to know which
-/// Rhino / Grasshopper / RhinoInsideRevit / G-Loom build was used so the
-/// recipe can be rerun (or its caveats understood).
-/// </summary>
 public sealed record Toolchain(
     string Rhino,
     string Grasshopper,
     string? RhinoInsideRevit,
     string Gloom);
 
+public sealed record AecMetadata(
+    string? Phase,
+    string? Submittal,
+    string? SheetSet,
+    string? Notes);
+
+public sealed record ProductMetadata(
+    string? Sku,
+    string? Variant,
+    string? Notes);
+
+public sealed record ReleaseMetadata(
+    string? Version,
+    string? Notes);
+
 public static class TagMetadataJson
 {
+    /// <summary>
+    /// Tag metadata is written into a git tag message. Compact-but-readable:
+    /// indented + camelCase, but null fields are omitted so an annotated
+    /// tag created with only a name + notes doesn't produce a wall of
+    /// `null`s under `git show &lt;tag&gt;`.
+    /// </summary>
+    public static readonly JsonSerializerOptions Options = new()
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
+
     public static string Write(TagMetadata m) =>
-        JsonSerializer.Serialize(m, CanonicalJson.Options);
+        JsonSerializer.Serialize(m, Options);
 
     /// <summary>
     /// Best-effort parse of the tag message body. Returns null for
@@ -49,7 +84,7 @@ public static class TagMetadataJson
         {
             return JsonSerializer.Deserialize<TagMetadata>(
                 messageBody.AsSpan(idx),
-                CanonicalJson.Options);
+                Options);
         }
         catch
         {
