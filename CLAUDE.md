@@ -162,7 +162,7 @@ Tools available on the machine: `dotnet` 8.0.200 at `C:\Program Files\dotnet\`, 
 
 ## What's done and what's next
 
-### Phase 1 — Done (commits up through `bb479f0` and the rename commit that follows this file)
+### Phase 1 — Done (through `2e56f85`)
 
 - Loadable `.gha` (cross-platform, Windows + macOS Rhino 8)
 - Canonical structural JSON serializer (`<name>.gloom.json` alongside the `.gh`)
@@ -171,22 +171,28 @@ Tools available on the machine: `dotnet` 8.0.200 at `C:\Program Files\dotnet\`, 
 - Restore (file-only `git checkout <sha> -- <files>`, doesn't move HEAD)
 - Multi-file repo isolation (each `.gh` sees only its own commits in the panel)
 - Tab-switch sync (panel tracks active document)
-- Branch ops: list/create/switch/delete with system-aware UI
+- Branch ops: list / create / switch / delete with system-aware UI
 - Reload-all-in-repo on branch switch (originally-active doc stays active)
 - Paired `.gh + .gloom.json` blob fingerprint for "current commit" arrow
 - Cross-platform deploy scripts
 
-### Phase 2 — Underway (next concrete work)
+### Phase 2 — Done (through `d73ace4`)
 
-- **Tags** (lightweight): list / create / delete via the panel
-- **Toolchain metadata** captured at every tag (Rhino + GH + plugin versions)
-- **Per-tag metadata schema** that supports submittal info (Mode 1), product cert (Mode 2), and release notes (Mode 3)
-- **Branch-base markers** in history (where the current branch forked from its parent)
-- **Branch rename**
+- **Branch rename** via panel dropdown (`f1f8a44`)
+- **Branch-base markers** in history: small `↰ branched from <names>` badge above the merge-base commit, anchored to the default branch (origin/HEAD or local main/master) and the closest other branch by merge-base timestamp; deduplicated when both resolve to the same SHA (`3b73f8e`)
+- **Per-commit details drawer** with `▾ / ▴` toggle and expansion state preserved across panel refresh; lives below each commit row and is the home for tag listing today and toolchain/per-tag schema metadata going forward (`8955a60`)
+- **Tags** with create/delete (`+ add tag`, `[×]`) inside the drawer (`8955a60`)
+- **Toolchain metadata at tag time**: Rhino + Grasshopper + RhinoInsideRevit (if loaded) + G-Loom versions captured automatically and embedded as JSON in the annotated tag message — no working-tree files, no extra commits, travels intact with `git push --tags` (`b053842`)
+- **Mode-aware per-tag schema** (v2): always-available `notes` plus optional `aec` (phase / submittal / sheet set / notes), `product` (sku / variant / notes), and `release` (version / notes) sub-records. Tag creation uses a custom Eto dialog with collapsible sections; only expanded sections contribute to the tag. v1 messages still parse cleanly because new params have `= null` defaults (`d73ace4`)
+- **Tag-name auto-rewrite** (space → hyphen) in the dialog so the user never hits git's check-ref-format wall (`d73ace4`)
 
-### Beyond Phase 2
+### Phase 3 — Underway (next concrete work)
 
-See README's Roadmap section. Roughly: visual diff (Phase 3) → team collaboration (Phase 4) → merge with on-canvas conflict UI (Phase 5) → scoped branches with promote/refresh (Phase 6) → LFS for heavy geometry (Phase 7) → audit, distribution, polish (Phase 8).
+- **Visual diff** — show which components, wires, and persistent values changed between two commits (typically `current` vs a chosen commit / branch / tag). The thesis-honest version is on-canvas: added components in green, removed in red, modified in yellow, with rerouted wires highlighted. A first cut may be a structural inspector inside the drawer (text-mode listing of additions / deletions / param changes) before the on-canvas overlay lands.
+
+### Beyond Phase 3
+
+See README's Roadmap section. Roughly: team collaboration (Phase 4) → merge with on-canvas conflict UI (Phase 5) → scoped branches with promote/refresh (Phase 6) → LFS for heavy geometry (Phase 7) → audit, distribution, polish (Phase 8).
 
 ## Pointers to the user's persistent memory
 
