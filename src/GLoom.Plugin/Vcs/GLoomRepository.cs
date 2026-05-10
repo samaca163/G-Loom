@@ -243,6 +243,22 @@ public static class GLoomRepository
     }
 
     /// <summary>
+    /// Renames a branch via `git branch -m &lt;old&gt; &lt;new&gt;`. Works whether
+    /// the branch is currently checked out or not. Throws on conflict (a
+    /// branch with the new name already exists) or invalid name.
+    /// </summary>
+    public static void RenameBranch(string repoRoot, string oldName, string newName)
+    {
+        if (!IsRepo(repoRoot))
+            throw new InvalidOperationException($"{repoRoot} is not a Git repo.");
+
+        var result = Run(repoRoot, "branch", "-m", oldName, newName);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException(
+                $"git branch -m {oldName} {newName} failed (exit {result.ExitCode}): {result.StdErr.Trim()}");
+    }
+
+    /// <summary>
     /// Returns the union of .gh files tracked on <paramref name="targetBranch"/>
     /// and currently in the working tree - i.e. every .gh that may be
     /// added, modified, or removed by `git checkout &lt;targetBranch&gt;`.
