@@ -259,6 +259,22 @@ public sealed class GLoomPanel : Panel
         foreach (var list in tagsBySha.Values)
             list.Sort((a, b) => StringComparer.Ordinal.Compare(a.Name, b.Name));
 
+        // Read the current working tree's canonical JSON ONCE per refresh -
+        // every row's diff has the same right-hand side (current state),
+        // and parsing N times wastes work. Historic JSON is read lazily
+        // when each row's drawer is first expanded.
+        CanonicalDocument? currentDoc = null;
+        try
+        {
+            if (s.CanonicalJsonFullPath is not null && File.Exists(s.CanonicalJsonFullPath))
+                currentDoc = CanonicalJson.TryParse(File.ReadAllText(s.CanonicalJsonFullPath));
+        }
+        catch { /* leave currentDoc null; diffs render as unavailable */ }
+
+        var jsonRel = s.CanonicalJsonFullPath is not null
+            ? Path.GetRelativePath(s.RepoPath, s.CanonicalJsonFullPath)
+            : null;
+
         var visibleShas = new HashSet<string>(StringComparer.Ordinal);
         _historyContainer.Items.Clear();
         foreach (var c in commits)
@@ -268,12 +284,24 @@ public sealed class GLoomPanel : Panel
             forksBySha.TryGetValue(c.Sha, out var parents);
             tagsBySha.TryGetValue(c.Sha, out var rowTags);
             var sha = c.Sha;
+            var repoPath = s.RepoPath;
+
+            Func<DocumentDiff?> diffProvider = isCurrent || currentDoc is null || jsonRel is null
+                ? () => null
+                : () =>
+                {
+                    var historicJson = GLoomRepository.ReadFileAtCommit(repoPath, sha, jsonRel);
+                    var historicDoc = CanonicalJson.TryParse(historicJson);
+                    return historicDoc is null ? null : DocumentDiff.Compute(historicDoc, currentDoc);
+                };
+
             var row = new CommitRow(
                 info: c,
                 isCurrent: isCurrent,
                 forkParents: parents,
                 tags: rowTags,
                 initiallyExpanded: _expandedShas.Contains(sha),
+                diffProvider: diffProvider,
                 onRestore: () => OnRestoreClicked(sha, c.Message),
                 onCreateTag: () => OnCreateTagClicked(sha, c.Message),
                 onDeleteTag: name => OnDeleteTagClicked(name),
@@ -749,6 +777,7 @@ public sealed class GLoomPanel : Panel
             IReadOnlyList<string>? forkParents,
             IReadOnlyList<GLoomRepository.TagInfo>? tags,
             bool initiallyExpanded,
+            Func<DocumentDiff?> diffProvider,
             Action onRestore,
             Action onCreateTag,
             Action<string> onDeleteTag,
@@ -774,13 +803,36 @@ public sealed class GLoomPanel : Panel
             };
             restoreBtn.Click += (_, _) => onRestore();
 
-            var details = BuildDetailsPanel(tags, onCreateTag, onDeleteTag);
-            details.Visible = initiallyExpanded;
+            // Drawer body = tags section + a slot we fill with the diff
+            // section on first expansion (lazy so the panel doesn't pay
+            // N git-show calls per refresh just to populate sections the
+            // user may never open).
+            var tagsPanel = BuildDetailsPanel(tags, onCreateTag, onDeleteTag);
+            var diffSlot = new Panel();
+            var drawerStack = new StackLayout
+            {
+                Orientation = Orientation.Vertical,
+                Spacing = 2,
+            };
+            drawerStack.Items.Add(tagsPanel);
+            if (!isCurrent) drawerStack.Items.Add(diffSlot);
+
+            var details = new Panel { Content = drawerStack, Visible = initiallyExpanded };
+
+            var diffLoaded = false;
+            void EnsureDiffLoaded()
+            {
+                if (diffLoaded || isCurrent) return;
+                diffLoaded = true;
+                diffSlot.Content = BuildDiffSection(diffProvider());
+            }
+
+            if (initiallyExpanded) EnsureDiffLoaded();
 
             var toggleBtn = new Button
             {
                 Text = initiallyExpanded ? "▴" : "▾",
-                ToolTip = "Show commit details (tags, metadata)",
+                ToolTip = "Show commit details (tags, changes from this version)",
                 Size = new Size(26, 26),
             };
             toggleBtn.Click += (_, _) =>
@@ -788,6 +840,7 @@ public sealed class GLoomPanel : Panel
                 var newState = !details.Visible;
                 details.Visible = newState;
                 toggleBtn.Text = newState ? "▴" : "▾";
+                if (newState) EnsureDiffLoaded();
                 onExpansionChanged(newState);
             };
 
@@ -984,5 +1037,92 @@ public sealed class GLoomPanel : Panel
             TextColor = Color.FromGrayscale(0.5f),
             Wrap = WrapMode.Word,
         };
+
+        private static Panel BuildDiffSection(DocumentDiff? diff)
+        {
+            var stack = new StackLayout
+            {
+                Orientation = Orientation.Vertical,
+                Spacing = 2,
+                Padding = new Padding(20, 6, 12, 6),
+            };
+
+            var headerText = diff is null
+                ? "Changes from this version (unavailable)"
+                : diff.IsEmpty
+                    ? "Changes from this version (none)"
+                    : $"Changes from this version ({diff.TotalChanges})";
+
+            stack.Items.Add(new Label
+            {
+                Text = headerText,
+                Font = new Font(SystemFont.Bold, 9),
+                TextColor = Color.FromGrayscale(0.5f),
+            });
+
+            if (diff is null)
+            {
+                stack.Items.Add(new Label
+                {
+                    Text = "(historic .gloom.json couldn't be read)",
+                    TextColor = Color.FromGrayscale(0.55f),
+                });
+                return new Panel { Content = stack };
+            }
+
+            if (diff.IsEmpty) return new Panel { Content = stack };
+
+            AppendCategory(stack, "Added",
+                diff.ObjectsAdded.Select(DocumentDiff.DisplayName).ToList());
+            AppendCategory(stack, "Removed",
+                diff.ObjectsRemoved.Select(DocumentDiff.DisplayName).ToList());
+            AppendCategoryWithSummary(stack, "Modified",
+                diff.ObjectsModified
+                    .Select(c => (DocumentDiff.DisplayName(c.To), c.Summary))
+                    .ToList());
+
+            if (diff.GroupsAdded.Count > 0 || diff.GroupsRemoved.Count > 0 || diff.GroupsModified.Count > 0)
+            {
+                AppendCategory(stack, "Groups added",
+                    diff.GroupsAdded.Select(g => g.Name).ToList());
+                AppendCategory(stack, "Groups removed",
+                    diff.GroupsRemoved.Select(g => g.Name).ToList());
+                AppendCategoryWithSummary(stack, "Groups modified",
+                    diff.GroupsModified
+                        .Select(c => (c.To.Name, c.Summary))
+                        .ToList());
+            }
+
+            return new Panel { Content = stack };
+        }
+
+        private static void AppendCategory(
+            StackLayout parent, string title, IReadOnlyList<string> items)
+        {
+            if (items.Count == 0) return;
+            parent.Items.Add(new Label
+            {
+                Text = $"{title} ({items.Count})",
+                Font = new Font(SystemFont.Bold, 9),
+                TextColor = Color.FromGrayscale(0.4f),
+            });
+            foreach (var item in items)
+                parent.Items.Add(MetaLine($"   • {item}"));
+        }
+
+        private static void AppendCategoryWithSummary(
+            StackLayout parent, string title,
+            IReadOnlyList<(string Name, string Summary)> items)
+        {
+            if (items.Count == 0) return;
+            parent.Items.Add(new Label
+            {
+                Text = $"{title} ({items.Count})",
+                Font = new Font(SystemFont.Bold, 9),
+                TextColor = Color.FromGrayscale(0.4f),
+            });
+            foreach (var (name, summary) in items)
+                parent.Items.Add(MetaLine($"   • {name} — {summary}"));
+        }
     }
 }
