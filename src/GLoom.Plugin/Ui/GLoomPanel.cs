@@ -284,8 +284,9 @@ public sealed class GLoomPanel : Panel
     /// <summary>
     /// Renders the branch dropdown: the button shows the current branch and
     /// a ▼ hint, and clicking opens a menu listing every branch (active one
-    /// disabled, others switch on click), plus "New branch..." and a
-    /// "Delete branch..." sub-menu of non-current branches.
+    /// disabled, others switch on click), plus "New branch...", a
+    /// "Rename branch..." sub-menu of every branch, and a "Delete branch..."
+    /// sub-menu of non-current branches.
     /// </summary>
     private void UpdateBranchControl(
         TrackedState s,
@@ -324,6 +325,16 @@ public sealed class GLoomPanel : Panel
         var newItem = new ButtonMenuItem { Text = "New branch..." };
         newItem.Click += (_, _) => OnCreateBranchClicked(s);
         menu.Items.Add(newItem);
+
+        var renameRoot = new ButtonMenuItem { Text = "Rename branch..." };
+        foreach (var b in branches)
+        {
+            var name = b.Name;
+            var sub = new ButtonMenuItem { Text = b.IsCurrent ? $"▶ {name}" : name };
+            sub.Click += (_, _) => OnRenameBranchClicked(s, name);
+            renameRoot.Items.Add(sub);
+        }
+        menu.Items.Add(renameRoot);
 
         var deleteRoot = new ButtonMenuItem { Text = "Delete branch..." };
         var nonCurrent = branches.Where(b => !b.IsCurrent).ToList();
@@ -407,6 +418,32 @@ public sealed class GLoomPanel : Panel
         {
             RhinoApp.WriteLine($"[G-Loom] Branch creation failed: {ex.Message}");
             MessageBox.Show($"Branch creation failed:\n\n{ex.Message}",
+                "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
+        }
+    }
+
+    private void OnRenameBranchClicked(TrackedState s, string oldName)
+    {
+        if (s.RepoPath is null) return;
+
+        var newName = string.Empty;
+        var ok = Rhino.UI.Dialogs.ShowEditBox(
+            "G-Loom: Rename branch", $"Rename '{oldName}' to:", oldName, false, out newName);
+        if (!ok || string.IsNullOrWhiteSpace(newName)) return;
+        var trimmed = newName.Trim();
+        if (trimmed == oldName) return;
+
+        try
+        {
+            GLoomRepository.RenameBranch(s.RepoPath, oldName, trimmed);
+            RhinoApp.WriteLine($"[G-Loom] Renamed branch '{oldName}' -> '{trimmed}'.");
+            DocumentTracker.Instance.Refresh();
+            Refresh();
+        }
+        catch (Exception ex)
+        {
+            RhinoApp.WriteLine($"[G-Loom] Branch rename failed: {ex.Message}");
+            MessageBox.Show($"Branch rename failed:\n\n{ex.Message}",
                 "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
         }
     }
