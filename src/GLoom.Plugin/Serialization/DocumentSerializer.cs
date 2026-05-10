@@ -13,14 +13,16 @@ namespace GLoom.Serialization;
 
 /// <summary>
 /// Walks a live <see cref="GH_Document"/> and emits a <see cref="CanonicalDocument"/>.
-/// Phase 1b extends the structural pass with persistent value capture for the
+/// Phase 1b extended the structural pass with persistent value capture for the
 /// free-floating params people actually iterate on (sliders, panels, booleans,
 /// value lists, color swatches, MD sliders, gradients), plus a SHA-256 digest
 /// fallback for params holding internalized data we don't structurally model.
+/// Schema v3 adds bounds capture so the on-canvas overlay can render accurate
+/// ghosts for deleted components.
 /// </summary>
 public static class DocumentSerializer
 {
-    private const int CurrentSchemaVersion = 2;
+    private const int CurrentSchemaVersion = 3;
 
     public static CanonicalDocument Serialize(GH_Document document)
     {
@@ -86,7 +88,8 @@ public static class DocumentSerializer
             Nickname: NullSafe(component.NickName),
             Pivot: ExtractPivot(component),
             Inputs: inputs,
-            Outputs: outputs);
+            Outputs: outputs,
+            Bounds: ExtractBounds(component));
     }
 
     private static CanonicalObject SerializeFreeFloatingParam(IGH_Param param)
@@ -105,7 +108,8 @@ public static class DocumentSerializer
             Pivot: ExtractPivot(param),
             Inputs: new[] { syntheticInput },
             Outputs: Array.Empty<CanonicalParameter>(),
-            Persistent: CapturePersistent(param));
+            Persistent: CapturePersistent(param),
+            Bounds: ExtractBounds(param));
     }
 
     /// <summary>
@@ -247,6 +251,13 @@ public static class DocumentSerializer
     {
         var p = obj.Attributes?.Pivot ?? PointF.Empty;
         return new Pivot(p.X, p.Y);
+    }
+
+    private static Bounds? ExtractBounds(IGH_DocumentObject obj)
+    {
+        var b = obj.Attributes?.Bounds ?? RectangleF.Empty;
+        if (b.IsEmpty || (b.Width == 0 && b.Height == 0)) return null;
+        return new Bounds(b.X, b.Y, b.Width, b.Height);
     }
 
     private static string Format(Guid g) => g.ToString("D");
