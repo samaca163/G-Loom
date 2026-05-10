@@ -3,15 +3,16 @@ using System.Collections.Generic;
 namespace GLoom.Serialization;
 
 /// <summary>
-/// Schema v2 of the canonical, diff-friendly representation of a Grasshopper
+/// Schema v3 of the canonical, diff-friendly representation of a Grasshopper
 /// document. Designed for stability across saves: deterministic field order,
 /// objects sorted by InstanceGuid, sources sorted lexicographically.
 ///
-/// v2 adds the optional <see cref="CanonicalObject.Persistent"/> field to
-/// capture user-tweakable values (sliders, panels, booleans, value lists,
-/// etc.) so a diff can show "this slider went from 5 to 10", not just
-/// structural changes. v1 documents parse cleanly because Persistent has a
-/// `= null` default; v1 readers ignore the new field.
+/// v3 adds the optional <see cref="CanonicalObject.Bounds"/> field so the
+/// on-canvas overlay can render an accurate ghost outline for deleted
+/// components (the live canvas no longer carries them, so the schema has
+/// to). v2 added <see cref="CanonicalObject.Persistent"/> for user-tweakable
+/// values. Older documents parse cleanly because both new fields have
+/// `= null` defaults; older plugin readers ignore them.
 /// </summary>
 public sealed record CanonicalDocument(
     int SchemaVersion,
@@ -32,9 +33,12 @@ public sealed record CanonicalObject(
     Pivot Pivot,
     IReadOnlyList<CanonicalParameter> Inputs,
     IReadOnlyList<CanonicalParameter> Outputs,
-    PersistentData? Persistent = null);
+    PersistentData? Persistent = null,
+    Bounds? Bounds = null);
 
 public sealed record Pivot(float X, float Y);
+
+public sealed record Bounds(float X, float Y, float Width, float Height);
 
 public sealed record CanonicalParameter(
     string InstanceGuid,
