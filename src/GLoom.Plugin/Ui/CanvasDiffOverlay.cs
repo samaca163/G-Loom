@@ -582,14 +582,17 @@ public sealed class CanvasDiffOverlay
 
         }
 
-        // Missing-wire arrows: any wire that existed in the from-doc
-        // but doesn't in live. Covers BOTH pre-restore deletions
-        // (consumers in modified-with-wires-changed) AND post-restore
-        // missing output wires (consumers still in modified, since we
-        // don't auto-reconnect downstream consumers when restoring a
-        // deleted component).
+        // Wire deltas: red dashed arrows for missing wires (existed in
+        // from but not in live) + green beziers for added wires (in
+        // live but not in from). Both follow the same per-port grip
+        // anchors so they read like proper GH wires - bezier curves
+        // landing on the actual input/output ports rather than just
+        // bounding-rect edges.
         if (s._cachedFromDoc is not null)
+        {
             PaintMissingWires(graphics, diff, doc, liveById, deletionRects);
+            PaintAddedWires(graphics, diff, doc, liveById);
+        }
 
         // Bucket each modified change as either "Moved" (move-only) or
         // "Modified" (everything else). A change carrying both Moved AND
@@ -1067,57 +1070,30 @@ public sealed class CanvasDiffOverlay
         Dictionary<string, IGH_DocumentObject> liveById,
         Dictionary<string, RectangleF> deletionRects)
     {
-        // Source-anchor lookup keyed by output PARAM GUID (the GUID
-        // that appears in downstream input.Sources). For live
-        // components/params we use the actual OutputGrip point
-        // (per-port wire connection point) so arrows land on the
-        // specific output port, not just the bounding rect's
-        // right-middle. Falls back to right-middle if grip data
-        // isn't available.
-        var liveOutputAnchors = new Dictionary<string, PointF>(StringComparer.Ordinal);
-        foreach (var obj in doc.Objects)
-        {
-            if (obj is IGH_Component comp)
-            {
-                foreach (var output in comp.Params.Output)
-                {
-                    var grip = output.Attributes?.OutputGrip ?? PointF.Empty;
-                    if (grip == PointF.Empty)
-                    {
-                        var b = comp.Attributes?.Bounds ?? RectangleF.Empty;
-                        if (b.IsEmpty) continue;
-                        grip = new PointF(b.Right, b.Y + b.Height / 2f);
-                    }
-                    liveOutputAnchors[output.InstanceGuid.ToString("D")] = grip;
-                }
-            }
-            else if (obj is IGH_Param param)
-            {
-                var grip = param.Attributes?.OutputGrip ?? PointF.Empty;
-                if (grip == PointF.Empty)
-                {
-                    var b = param.Attributes?.Bounds ?? RectangleF.Empty;
-                    if (b.IsEmpty) continue;
-                    grip = new PointF(b.Right, b.Y + b.Height / 2f);
-                }
-                liveOutputAnchors[param.InstanceGuid.ToString("D")] = grip;
-            }
-        }
+        // Source-anchor lookups keyed by output PARAM GUID (the GUID
+        // that appears in downstream input.Sources). Live anchors come
+        // from per-port OutputGrip; ghost anchors are distributed
+        // along the deletion rect's right edge per output index.
+        var liveOutputAnchors = BuildLiveOutputAnchors(doc);
 
         var ghostOutputAnchors = new Dictionary<string, PointF>(StringComparer.Ordinal);
         foreach (var removed in diff.ObjectsRemoved)
         {
             if (!deletionRects.TryGetValue(removed.InstanceGuid, out var rect)) continue;
-            var rightMid = new PointF(rect.Right, rect.Y + rect.Height / 2f);
 
             if (removed.Outputs.Count > 0)
             {
-                foreach (var output in removed.Outputs)
-                    ghostOutputAnchors[output.InstanceGuid] = rightMid;
+                // Distribute output anchors along the right edge so a
+                // multi-output deleted component shows distinct arrow
+                // starting points per output instead of all collapsing
+                // to the same right-middle point.
+                var n = removed.Outputs.Count;
+                for (var i = 0; i < n; i++)
+                    ghostOutputAnchors[removed.Outputs[i].InstanceGuid] = GhostPortAnchor(rect, leftEdge: false, i, n);
             }
             else
             {
-                ghostOutputAnchors[removed.InstanceGuid] = rightMid;
+                ghostOutputAnchors[removed.InstanceGuid] = GhostPortAnchor(rect, leftEdge: false, 0, 1);
             }
         }
 
@@ -1150,28 +1126,154 @@ public sealed class CanvasDiffOverlay
                 {
                     if (!TryFindWireAnchor(src, liveOutputAnchors, ghostOutputAnchors, out var srcAnchor)) continue;
                     var consumerAnchor = LiveInputAnchor(consumer, consumerInputs, i);
-                    g.DrawLine(pen, srcAnchor, consumerAnchor);
+                    DrawWireBezier(g, pen, srcAnchor, consumerAnchor);
                 }
             }
         }
 
         // Pass 2: deleted consumers - every input source is missing.
-        // No live grip data (consumer is gone), so the arrow targets
-        // the left-middle of the ghost rect.
+        // Per-input-index anchors along the left edge so multi-input
+        // deleted components show distinct arrow endpoints per input
+        // instead of collapsing to a single left-middle point.
         foreach (var removed in diff.ObjectsRemoved)
         {
             if (!deletionRects.TryGetValue(removed.InstanceGuid, out var rect)) continue;
-            var consumerAnchor = new PointF(rect.X, rect.Y + rect.Height / 2f);
+            var inputCount = removed.Inputs.Count;
 
-            foreach (var input in removed.Inputs)
+            for (var i = 0; i < removed.Inputs.Count; i++)
             {
-                foreach (var src in input.Sources)
+                var consumerAnchor = GhostPortAnchor(rect, leftEdge: true, i, inputCount);
+                foreach (var src in removed.Inputs[i].Sources)
                 {
                     if (TryFindWireAnchor(src, liveOutputAnchors, ghostOutputAnchors, out var srcAnchor))
-                        g.DrawLine(pen, srcAnchor, consumerAnchor);
+                        DrawWireBezier(g, pen, srcAnchor, consumerAnchor);
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Green solid bezier for any wire that exists in live but didn't
+    /// in the from-doc. Two sources of "added wires":
+    ///  - A completely new component (in ObjectsAdded). Every input
+    ///    source is new by definition.
+    ///  - An existing component that gained a new source on one of
+    ///    its inputs (in ObjectsModified with WiresChanged).
+    /// Both kinds anchor on the SPECIFIC live ports (per-output
+    /// OutputGrip and per-input InputGrip) so the bezier overlays the
+    /// actual wire path GH already paints, reading as a green
+    /// "this wire is new since reference" highlight.
+    /// </summary>
+    private static void PaintAddedWires(
+        Graphics g,
+        DocumentDiff diff,
+        GH_Document doc,
+        Dictionary<string, IGH_DocumentObject> liveById)
+    {
+        var liveOutputAnchors = BuildLiveOutputAnchors(doc);
+        if (liveOutputAnchors.Count == 0) return;
+
+        using var pen = new Pen(Color.FromArgb(220, 60, 200, 60), 2.5f);
+
+        // Pass A: brand-new components - every input source is new.
+        foreach (var added in diff.ObjectsAdded)
+        {
+            if (!liveById.TryGetValue(added.InstanceGuid, out var consumer)) continue;
+            var consumerInputs = LiveInputsOf(consumer);
+
+            for (var i = 0; i < added.Inputs.Count; i++)
+            {
+                foreach (var src in added.Inputs[i].Sources)
+                {
+                    if (!liveOutputAnchors.TryGetValue(src, out var srcAnchor)) continue;
+                    var consumerAnchor = LiveInputAnchor(consumer, consumerInputs, i);
+                    DrawWireBezier(g, pen, srcAnchor, consumerAnchor);
+                }
+            }
+        }
+
+        // Pass B: existing components with new sources on existing inputs.
+        foreach (var change in diff.ObjectsModified)
+        {
+            if ((change.Kinds & ObjectChangeKind.WiresChanged) == 0) continue;
+            if (!liveById.TryGetValue(change.To.InstanceGuid, out var consumer)) continue;
+
+            var consumerInputs = LiveInputsOf(consumer);
+            for (var i = 0; i < change.From.Inputs.Count && i < change.To.Inputs.Count; i++)
+            {
+                var fromSet = new HashSet<string>(change.From.Inputs[i].Sources, StringComparer.Ordinal);
+                foreach (var src in change.To.Inputs[i].Sources)
+                {
+                    if (fromSet.Contains(src)) continue;
+                    if (!liveOutputAnchors.TryGetValue(src, out var srcAnchor)) continue;
+                    var consumerAnchor = LiveInputAnchor(consumer, consumerInputs, i);
+                    DrawWireBezier(g, pen, srcAnchor, consumerAnchor);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// GH-style wire bezier: horizontal-leaning curve from source's
+    /// right side to target's left side, with control-point bend
+    /// proportional to horizontal distance (clamped to 40px so very
+    /// close ports still render as a curve, not a straight segment).
+    /// </summary>
+    private static void DrawWireBezier(Graphics g, Pen pen, PointF source, PointF target)
+    {
+        var bend = Math.Max(40f, Math.Abs(target.X - source.X) * 0.5f);
+        var c1 = new PointF(source.X + bend, source.Y);
+        var c2 = new PointF(target.X - bend, target.Y);
+        g.DrawBezier(pen, source, c1, c2, target);
+    }
+
+    private static Dictionary<string, PointF> BuildLiveOutputAnchors(GH_Document doc)
+    {
+        var anchors = new Dictionary<string, PointF>(StringComparer.Ordinal);
+        foreach (var obj in doc.Objects)
+        {
+            if (obj is IGH_Component comp)
+            {
+                foreach (var output in comp.Params.Output)
+                {
+                    var grip = output.Attributes?.OutputGrip ?? PointF.Empty;
+                    if (grip == PointF.Empty)
+                    {
+                        var b = comp.Attributes?.Bounds ?? RectangleF.Empty;
+                        if (b.IsEmpty) continue;
+                        grip = new PointF(b.Right, b.Y + b.Height / 2f);
+                    }
+                    anchors[output.InstanceGuid.ToString("D")] = grip;
+                }
+            }
+            else if (obj is IGH_Param param)
+            {
+                var grip = param.Attributes?.OutputGrip ?? PointF.Empty;
+                if (grip == PointF.Empty)
+                {
+                    var b = param.Attributes?.Bounds ?? RectangleF.Empty;
+                    if (b.IsEmpty) continue;
+                    grip = new PointF(b.Right, b.Y + b.Height / 2f);
+                }
+                anchors[param.InstanceGuid.ToString("D")] = grip;
+            }
+        }
+        return anchors;
+    }
+
+    /// <summary>
+    /// Evenly distributes port anchors along the LEFT or RIGHT edge of
+    /// a ghost rect by index, mirroring how GH lays out input/output
+    /// ports vertically. For a single port it returns the edge midpoint,
+    /// matching the previous behavior.
+    /// </summary>
+    private static PointF GhostPortAnchor(RectangleF rect, bool leftEdge, int index, int totalCount)
+    {
+        var x = leftEdge ? rect.X : rect.Right;
+        var y = totalCount > 0
+            ? rect.Top + (index + 0.5f) * (rect.Height / totalCount)
+            : rect.Y + rect.Height / 2f;
+        return new PointF(x, y);
     }
 
     private static IList<IGH_Param>? LiveInputsOf(IGH_DocumentObject obj) => obj switch
