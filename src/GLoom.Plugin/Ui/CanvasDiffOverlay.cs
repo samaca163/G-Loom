@@ -4,14 +4,19 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
+using GH_IO.Serialization;
 using GLoom.Serialization;
 using GLoom.Vcs;
 using Grasshopper;
 using Grasshopper.GUI.Canvas;
 using Grasshopper.Kernel;
+using Grasshopper.Kernel.Special;
+using Grasshopper.Kernel.Types;
 using Rhino;
 using Bounds = GLoom.Serialization.Bounds;
 using WinFormsMouseEventArgs = System.Windows.Forms.MouseEventArgs;
+using WinFormsMouseButtons = System.Windows.Forms.MouseButtons;
+using WinFormsContextMenuStrip = System.Windows.Forms.ContextMenuStrip;
 
 namespace GLoom.Ui;
 
@@ -43,13 +48,14 @@ public sealed class CanvasDiffOverlay
 
     private static readonly TimeSpan StaleAfter = TimeSpan.FromMilliseconds(250);
 
-    public bool Enabled { get; private set; }
+    public bool Enabled { get; private set; } = true;
 
     private bool _showAdded = true;
     private bool _showModified = true;
     private bool _showMoved = true;
     private bool _showDeleted = true;
     private bool _hoverDetailsOnly;
+    private string _comparisonReference = "HEAD";
 
     public bool ShowAdded { get => _showAdded; set => SetAndRefresh(ref _showAdded, value); }
     public bool ShowModified { get => _showModified; set => SetAndRefresh(ref _showModified, value); }
@@ -57,14 +63,51 @@ public sealed class CanvasDiffOverlay
     public bool ShowDeleted { get => _showDeleted; set => SetAndRefresh(ref _showDeleted, value); }
     public bool HoverDetailsOnly { get => _hoverDetailsOnly; set => SetAndRefresh(ref _hoverDetailsOnly, value); }
 
+    /// <summary>
+    /// Which commit the overlay compares the live state against. "HEAD"
+    /// (default) means "what have I changed since the last commit"; any
+    /// other SHA / ref means "what's changed since this version" -
+    /// useful for visualising the cumulative delta from a tag or older
+    /// commit, not just the most recent one.
+    /// </summary>
+    public string ComparisonReference => _comparisonReference;
+
+    public void SetComparisonReference(string reference)
+    {
+        if (string.IsNullOrWhiteSpace(reference)) reference = "HEAD";
+        if (_comparisonReference == reference) return;
+        _comparisonReference = reference;
+        _lastComputed = DateTime.MinValue;
+        _cachedDiff = null;
+        ComparisonReferenceChanged?.Invoke(this, EventArgs.Empty);
+        Instances.ActiveCanvas?.Refresh();
+    }
+
     public event EventHandler? EnabledChanged;
     public event EventHandler? SettingsChanged;
+    public event EventHandler? ComparisonReferenceChanged;
 
     private DocumentDiff? _cachedDiff;
+    private CanonicalDocument? _cachedFromDoc;
     private HashSet<string> _hoverableIds = new(StringComparer.Ordinal);
     private string? _hoveredId;
     private DateTime _lastComputed = DateTime.MinValue;
     private bool _initialized;
+    private string? _lastTrackedFilePath;
+    private string? _lastTrackedRepoPath;
+
+    // Painted ghost regions, refreshed every Paint cycle. Right-click
+    // hit-test consults this to decide whether to surface the restore
+    // menu on any given canvas position.
+    private readonly List<GhostRegion> _ghostRegions = new();
+
+    private enum GhostRestoreKind { Pivot, Persistent, Deleted }
+
+    private sealed record GhostRegion(
+        RectangleF Rect,
+        GhostRestoreKind Kind,
+        ObjectChange? Change,
+        CanonicalObject? Deleted);
 
     private void SetAndRefresh(ref bool field, bool value)
     {
@@ -84,12 +127,28 @@ public sealed class CanvasDiffOverlay
         Instances.CanvasCreated += HookCanvas;
         if (Instances.ActiveCanvas is { } ac) HookCanvas(ac);
 
-        // Tab/file/repo switches invalidate the cache so the next paint
-        // recomputes against the new document's HEAD.
+        // Any tracker state change invalidates the diff cache (the live
+        // doc may have been edited). The comparison reference, however,
+        // only snaps back to HEAD when the FILE or REPO actually
+        // changed - so an in-place edit (e.g. restoring a component)
+        // doesn't silently drop the user's picked reference.
         DocumentTracker.Instance.StateChanged += (_, _) =>
         {
+            var state = DocumentTracker.Instance.State;
+            var fileOrRepoChanged = state.FilePath != _lastTrackedFilePath
+                                 || state.RepoPath != _lastTrackedRepoPath;
+            _lastTrackedFilePath = state.FilePath;
+            _lastTrackedRepoPath = state.RepoPath;
+
             _lastComputed = DateTime.MinValue;
             _cachedDiff = null;
+
+            if (fileOrRepoChanged && _comparisonReference != "HEAD")
+            {
+                _comparisonReference = "HEAD";
+                ComparisonReferenceChanged?.Invoke(this, EventArgs.Empty);
+            }
+
             if (Enabled) Instances.ActiveCanvas?.Refresh();
         };
     }
@@ -104,12 +163,272 @@ public sealed class CanvasDiffOverlay
         RhinoApp.WriteLine($"[G-Loom] Diff overlay {(enabled ? "on" : "off")}.");
     }
 
+    private readonly Dictionary<GH_Canvas, GhostRightClickHook> _rightClickHooks = new();
+
     private void HookCanvas(GH_Canvas canvas)
     {
         if (canvas is null) return;
         canvas.CanvasPostPaintObjects += OnPostPaintObjects;
         canvas.MouseMove += OnCanvasMouseMove;
         canvas.MouseLeave += OnCanvasMouseLeave;
+
+        // Win32-level right-click intercept. Subscribing to MouseDown
+        // doesn't help - GH_Canvas processes WM_RBUTTONDOWN internally
+        // and shows its own context menu regardless of subscribers.
+        // A NativeWindow attached to the canvas's HWND sees the message
+        // first; if our hit-test matches a ghost we handle the click
+        // ourselves and don't forward, suppressing GH's menu cleanly.
+        if (!_rightClickHooks.ContainsKey(canvas))
+            _rightClickHooks[canvas] = new GhostRightClickHook(this, canvas);
+    }
+
+    /// <summary>
+    /// Called by the WM_RBUTTONDOWN interceptor. Returns true if the
+    /// click landed on a ghost (we handled it; GH's menu should not
+    /// show), false if no ghost was under the cursor (let GH proceed
+    /// with its normal right-click handling).
+    /// </summary>
+    private bool TryHandleRightClickAt(GH_Canvas canvas, Point clientPt)
+    {
+        if (!Enabled || _ghostRegions.Count == 0) return false;
+
+        PointF worldPt;
+        try { worldPt = canvas.Viewport.UnprojectPoint(clientPt); }
+        catch { return false; }
+
+        // Topmost-painted region wins (later registrations sit on top).
+        for (var i = _ghostRegions.Count - 1; i >= 0; i--)
+        {
+            var region = _ghostRegions[i];
+            if (region.Rect.Contains(worldPt))
+            {
+                ShowRestoreMenu(canvas, clientPt, region);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private sealed class GhostRightClickHook : System.Windows.Forms.NativeWindow
+    {
+        private const int WM_RBUTTONDOWN = 0x0204;
+
+        private readonly CanvasDiffOverlay _overlay;
+        private readonly GH_Canvas _canvas;
+
+        public GhostRightClickHook(CanvasDiffOverlay overlay, GH_Canvas canvas)
+        {
+            _overlay = overlay;
+            _canvas = canvas;
+            if (canvas.IsHandleCreated) AssignHandle(canvas.Handle);
+            canvas.HandleCreated += OnHandleCreated;
+            canvas.HandleDestroyed += OnHandleDestroyed;
+        }
+
+        private void OnHandleCreated(object? sender, EventArgs e) => AssignHandle(_canvas.Handle);
+        private void OnHandleDestroyed(object? sender, EventArgs e) => ReleaseHandle();
+
+        protected override void WndProc(ref System.Windows.Forms.Message m)
+        {
+            if (m.Msg == WM_RBUTTONDOWN)
+            {
+                // LParam packs client X (low word) and Y (high word).
+                var lParam = m.LParam.ToInt32();
+                var x = (short)(lParam & 0xFFFF);
+                var y = (short)((lParam >> 16) & 0xFFFF);
+                if (_overlay.TryHandleRightClickAt(_canvas, new Point(x, y)))
+                    return;
+            }
+            base.WndProc(ref m);
+        }
+    }
+
+    private void ShowRestoreMenu(GH_Canvas canvas, Point screenLoc, GhostRegion region)
+    {
+        var name = RegionDisplayName(region);
+        var refLabel = _comparisonReference == "HEAD"
+            ? "HEAD"
+            : (_comparisonReference.Length >= 7 ? _comparisonReference[..7] : _comparisonReference);
+        var actionLabel = region.Kind switch
+        {
+            GhostRestoreKind.Pivot      => $"Restore {name}'s position to {refLabel}",
+            GhostRestoreKind.Persistent => $"Restore {name}'s value to {refLabel}",
+            GhostRestoreKind.Deleted    => $"Restore deleted {name} ({refLabel})",
+            _ => $"Restore {name} to {refLabel}",
+        };
+
+        var menu = new WinFormsContextMenuStrip();
+        menu.Items.Add(actionLabel, null, (_, _) => DoRestore(region));
+        menu.Show(canvas, screenLoc);
+    }
+
+    private static string RegionDisplayName(GhostRegion region)
+    {
+        var obj = region.Deleted ?? region.Change?.To;
+        if (obj is null) return "component";
+        var n = string.IsNullOrEmpty(obj.Nickname) ? obj.Name : obj.Nickname;
+        return string.IsNullOrEmpty(n) ? "component" : n;
+    }
+
+    private void DoRestore(GhostRegion region)
+    {
+        var doc = Instances.ActiveCanvas?.Document;
+        if (doc is null) return;
+
+        try
+        {
+            doc.UndoUtil.RecordEvent("G-Loom: restore from overlay");
+            switch (region.Kind)
+            {
+                case GhostRestoreKind.Pivot when region.Change is { } c:
+                    RestorePivot(doc, c);
+                    break;
+                case GhostRestoreKind.Persistent when region.Change is { } c:
+                    RestorePersistent(doc, c);
+                    break;
+                case GhostRestoreKind.Deleted when region.Deleted is { } d:
+                    RestoreDeleted(doc, d);
+                    break;
+            }
+            doc.NewSolution(false);
+            _lastComputed = DateTime.MinValue;
+            Instances.ActiveCanvas?.Refresh();
+        }
+        catch (Exception ex)
+        {
+            RhinoApp.WriteLine($"[G-Loom] Restore failed: {ex.Message}");
+        }
+    }
+
+    private static void RestorePivot(GH_Document doc, ObjectChange change)
+    {
+        if (!Guid.TryParse(change.To.InstanceGuid, out var id)) return;
+        var live = doc.Objects.FirstOrDefault(o => o.InstanceGuid == id);
+        if (live?.Attributes is null) return;
+
+        live.Attributes.Pivot = new PointF(change.From.Pivot.X, change.From.Pivot.Y);
+        live.Attributes.ExpireLayout();
+        live.ExpireSolution(false);
+    }
+
+    private static void RestorePersistent(GH_Document doc, ObjectChange change)
+    {
+        if (!Guid.TryParse(change.To.InstanceGuid, out var id)) return;
+        var live = doc.Objects.FirstOrDefault(o => o.InstanceGuid == id);
+        if (live is null) return;
+
+        ApplyPersistent(live, change.From.Persistent);
+        live.ExpireSolution(false);
+    }
+
+    /// <summary>
+    /// Recreate a deleted component from its captured CanonicalObject.
+    /// Best-effort: we set the type, instance GUID, pivot, persistent
+    /// state, and reconnect input wires to source params that still
+    /// exist on the live canvas. If a source was also deleted (cascade),
+    /// that wire is silently dropped - the user can fix it manually or
+    /// restore the source first.
+    /// </summary>
+    private static void RestoreDeleted(GH_Document doc, CanonicalObject deleted)
+    {
+        if (!Guid.TryParse(deleted.ComponentGuid, out var typeGuid)) return;
+        if (!Guid.TryParse(deleted.InstanceGuid, out var instanceGuid)) return;
+
+        var newObj = Instances.ComponentServer.EmitObject(typeGuid);
+        if (newObj is null)
+        {
+            RhinoApp.WriteLine($"[G-Loom] Restore failed: component type {typeGuid} not registered.");
+            return;
+        }
+
+        newObj.NewInstanceGuid(instanceGuid);
+        doc.AddObject(newObj, false);
+
+        if (newObj.Attributes is not null)
+        {
+            newObj.Attributes.Pivot = new PointF(deleted.Pivot.X, deleted.Pivot.Y);
+            newObj.Attributes.ExpireLayout();
+        }
+
+        // Restore the original input + output param GUIDs. GH assigns
+        // fresh ones on EmitObject; without restoration, downstream
+        // consumers' from-doc source GUIDs wouldn't match this new
+        // component's outputs, breaking missing-wire arrows AND any
+        // future "compare to old commit" diff that references those
+        // param GUIDs as wire sources.
+        if (newObj is IGH_Component component)
+        {
+            for (var i = 0; i < deleted.Inputs.Count && i < component.Params.Input.Count; i++)
+                if (Guid.TryParse(deleted.Inputs[i].InstanceGuid, out var g))
+                    component.Params.Input[i].NewInstanceGuid(g);
+            for (var i = 0; i < deleted.Outputs.Count && i < component.Params.Output.Count; i++)
+                if (Guid.TryParse(deleted.Outputs[i].InstanceGuid, out var g))
+                    component.Params.Output[i].NewInstanceGuid(g);
+        }
+
+        ApplyPersistent(newObj, deleted.Persistent);
+
+        // Wire reconnection: deleted.Inputs[i].Sources contains the
+        // upstream params' InstanceGuids at deletion time.
+        if (newObj is IGH_Component component2)
+        {
+            for (var i = 0; i < deleted.Inputs.Count && i < component2.Params.Input.Count; i++)
+                ReconnectSources(doc, component2.Params.Input[i], deleted.Inputs[i].Sources);
+        }
+        else if (newObj is IGH_Param freeParam && deleted.Inputs.Count > 0)
+        {
+            ReconnectSources(doc, freeParam, deleted.Inputs[0].Sources);
+        }
+
+        newObj.ExpireSolution(false);
+    }
+
+    private static void ReconnectSources(GH_Document doc, IGH_Param input, IReadOnlyList<string> sourceGuids)
+    {
+        foreach (var srcGuidStr in sourceGuids)
+        {
+            if (!Guid.TryParse(srcGuidStr, out var srcGuid)) continue;
+            if (doc.Objects.FirstOrDefault(o => o.InstanceGuid == srcGuid) is IGH_Param srcParam)
+                input.AddSource(srcParam);
+        }
+    }
+
+    /// <summary>
+    /// Apply a captured PersistentData onto a live IGH_DocumentObject.
+    /// Used by both modified-restore (apply OLD value to existing live
+    /// object) and deletion-restore (apply OLD value to freshly recreated
+    /// object). Unsupported kinds and missing fields no-op gracefully.
+    /// </summary>
+    private static void ApplyPersistent(IGH_DocumentObject obj, PersistentData? from)
+    {
+        if (from is null) return;
+
+        switch (from.Kind)
+        {
+            case "slider" when obj is GH_NumberSlider slider && from.Slider is { } sv:
+                slider.Slider.Minimum = sv.Min;
+                slider.Slider.Maximum = sv.Max;
+                slider.Slider.DecimalPlaces = sv.Decimals;
+                slider.SetSliderValue(sv.Value);
+                break;
+
+            case "panel" when obj is GH_Panel panel:
+                panel.UserText = from.PanelText ?? string.Empty;
+                break;
+
+            case "boolean" when obj is GH_BooleanToggle toggle && from.BooleanState is { } b:
+                toggle.Value = b;
+                break;
+
+            case "color" when obj is GH_ColourSwatch swatch && !string.IsNullOrEmpty(from.ColorArgb):
+                try
+                {
+                    var argb = unchecked((int)Convert.ToUInt32(from.ColorArgb, 16));
+                    swatch.SwatchColour = Color.FromArgb(argb);
+                }
+                catch { /* malformed hex - leave as-is */ }
+                break;
+        }
     }
 
     private void OnCanvasMouseMove(object? sender, WinFormsMouseEventArgs e)
@@ -199,19 +518,22 @@ public sealed class CanvasDiffOverlay
         }
     }
 
-    private static DocumentDiff? ComputeLiveDiff()
+    private DocumentDiff? ComputeLiveDiff()
     {
         var state = DocumentTracker.Instance.State;
         if (state.Document is null
             || state.RepoPath is null
             || state.FilePath is null
             || state.CanonicalJsonFullPath is null)
+        {
+            _cachedFromDoc = null;
             return null;
+        }
 
         var jsonRel = Path.GetRelativePath(state.RepoPath, state.CanonicalJsonFullPath);
-        var headJson = GLoomRepository.ReadFileAtCommit(state.RepoPath, "HEAD", jsonRel);
-        var headDoc = CanonicalJson.TryParse(headJson);
-        if (headDoc is null) return null;
+        var historicJson = GLoomRepository.ReadFileAtCommit(state.RepoPath, _comparisonReference, jsonRel);
+        var headDoc = CanonicalJson.TryParse(historicJson);
+        if (headDoc is null) { _cachedFromDoc = null; return null; }
 
         CanonicalDocument liveDoc;
         try
@@ -220,9 +542,13 @@ public sealed class CanvasDiffOverlay
         }
         catch
         {
+            _cachedFromDoc = null;
             return null;
         }
 
+        // Stash the from-doc so paint can find downstream consumers of
+        // deleted components and visualize the missing output wires.
+        _cachedFromDoc = headDoc;
         return DocumentDiff.Compute(headDoc, liveDoc);
     }
 
@@ -232,13 +558,38 @@ public sealed class CanvasDiffOverlay
         var doc = canvas.Document;
         if (graphics is null || doc is null) return;
 
+        // Reset the right-click hit-test list every paint cycle. Each
+        // helper that paints a "ghost" surface registers its rect so
+        // OnCanvasMouseDown can find it on right-click.
+        s._ghostRegions.Clear();
+
         // Live objects keyed by the same string form CanonicalObject uses
         // (Guid.ToString("D")), so the lookup matches the diff entries.
         var liveById = doc.Objects.ToDictionary(o => o.InstanceGuid.ToString("D"));
 
+        var deletionRects = new Dictionary<string, RectangleF>(StringComparer.Ordinal);
         if (s.ShowDeleted)
+        {
             foreach (var removed in diff.ObjectsRemoved)
-                PaintDeletedGhost(graphics, removed);
+            {
+                var rect = PaintDeletedGhost(graphics, removed);
+                if (!rect.IsEmpty)
+                {
+                    deletionRects[removed.InstanceGuid] = rect;
+                    s._ghostRegions.Add(new GhostRegion(rect, GhostRestoreKind.Deleted, null, removed));
+                }
+            }
+
+        }
+
+        // Missing-wire arrows: any wire that existed in the from-doc
+        // but doesn't in live. Covers BOTH pre-restore deletions
+        // (consumers in modified-with-wires-changed) AND post-restore
+        // missing output wires (consumers still in modified, since we
+        // don't auto-reconnect downstream consumers when restoring a
+        // deleted component).
+        if (s._cachedFromDoc is not null)
+            PaintMissingWires(graphics, diff, doc, liveById, deletionRects);
 
         // Bucket each modified change as either "Moved" (move-only) or
         // "Modified" (everything else). A change carrying both Moved AND
@@ -256,7 +607,11 @@ public sealed class CanvasDiffOverlay
             var showExtras = !s.HoverDetailsOnly || isHovered;
 
             if ((change.Kinds & ObjectChangeKind.Moved) != 0 && s.ShowMoved && showExtras)
-                PaintMovementTrail(graphics, live, change.From);
+            {
+                var rect = PaintMovementTrail(graphics, live, change.From);
+                if (!rect.IsEmpty)
+                    s._ghostRegions.Add(new GhostRegion(rect, GhostRestoreKind.Pivot, change, null));
+            }
 
             if ((change.Kinds & ObjectChangeKind.PersistentChanged) != 0
                 && s.ShowModified
@@ -264,7 +619,9 @@ public sealed class CanvasDiffOverlay
                 && change.From.Persistent?.Kind != "panel"
                 && change.To.Persistent?.Kind != "panel")
             {
-                PaintPersistentGhost(graphics, live, change.From, change.To);
+                var rect = PaintPersistentGhost(graphics, live, change.From, change.To);
+                if (!rect.IsEmpty)
+                    s._ghostRegions.Add(new GhostRegion(rect, GhostRestoreKind.Persistent, change, null));
             }
         }
 
@@ -374,13 +731,15 @@ public sealed class CanvasDiffOverlay
     /// <summary>
     /// Movement viz: a dashed translucent rect at the OLD position (same
     /// size as the live one — pure moves don't change size) plus a solid
-    /// arrow from the old center to the new center.
+    /// arrow from the old center to the new center. Returns the OLD
+    /// bounds rect so the right-click hit-test knows where to look for
+    /// "restore position" requests.
     /// </summary>
-    private static void PaintMovementTrail(Graphics g, IGH_DocumentObject live, CanonicalObject from)
+    private static RectangleF PaintMovementTrail(Graphics g, IGH_DocumentObject live, CanonicalObject from)
     {
         var liveBounds = live.Attributes?.Bounds ?? RectangleF.Empty;
         var livePivot = live.Attributes?.Pivot ?? PointF.Empty;
-        if (liveBounds.IsEmpty) return;
+        if (liveBounds.IsEmpty) return RectangleF.Empty;
 
         var dx = from.Pivot.X - livePivot.X;
         var dy = from.Pivot.Y - livePivot.Y;
@@ -408,13 +767,16 @@ public sealed class CanvasDiffOverlay
         // Skip the arrow if the move is tiny (centers within a few pixels
         // - happens during attribute sync and reads as visual noise).
         var manhattan = Math.Abs(oldCenter.X - newCenter.X) + Math.Abs(oldCenter.Y - newCenter.Y);
-        if (manhattan < 8f) return;
-
-        using var arrowPen = new Pen(MovedColor, 2.5f)
+        if (manhattan >= 8f)
         {
-            CustomEndCap = new AdjustableArrowCap(5f, 6f, true),
-        };
-        g.DrawLine(arrowPen, oldCenter, newCenter);
+            using var arrowPen = new Pen(MovedColor, 2.5f)
+            {
+                CustomEndCap = new AdjustableArrowCap(5f, 6f, true),
+            };
+            g.DrawLine(arrowPen, oldCenter, newCenter);
+        }
+
+        return oldBounds;
     }
 
     /// <summary>
@@ -423,11 +785,11 @@ public sealed class CanvasDiffOverlay
     /// track + knob; color swatch gets a fill of the old color; the rest
     /// fall back to a labeled rect ("was: ...").
     /// </summary>
-    private static void PaintPersistentGhost(
+    private static RectangleF PaintPersistentGhost(
         Graphics g, IGH_DocumentObject live, CanonicalObject from, CanonicalObject to)
     {
         var liveBounds = live.Attributes?.Bounds ?? RectangleF.Empty;
-        if (liveBounds.IsEmpty) return;
+        if (liveBounds.IsEmpty) return RectangleF.Empty;
 
         var oldKind = from.Persistent?.Kind ?? "(none)";
         var oldData = from.Persistent;
@@ -497,7 +859,7 @@ public sealed class CanvasDiffOverlay
             g.DrawString(hsvaLabel, font, textBrush,
                 ghost.X + Math.Max(4f, (ghost.Width - size.Width) / 2f),
                 ghost.Bottom + 2f);
-            return;
+            return ghost;
         }
 
         g.FillRectangle(ghostFill, ghost);
@@ -526,6 +888,8 @@ public sealed class CanvasDiffOverlay
             g.DrawString(label, font, textBrush,
                 new RectangleF(ghost.X + 4f, y, innerWidth, measured.Height));
         }
+
+        return ghost;
     }
 
     private static void PaintSliderInside(
@@ -678,7 +1042,175 @@ public sealed class CanvasDiffOverlay
     /// Generic components (no persistent state) just get the bounds rect.
     /// Pre-v3 commits without captured bounds fall back to a default rect.
     /// </summary>
-    private static void PaintDeletedGhost(Graphics g, CanonicalObject deleted)
+    /// <summary>
+    /// Red dashed arrows for any wire that existed in the from-doc but
+    /// doesn't in the live state. Two sources of "missing wires":
+    ///  - A live consumer whose input lost a source (modified, kind
+    ///    includes WiresChanged). Common cases: a manually-disconnected
+    ///    wire, a deleted source, OR the post-restore case where we
+    ///    recreated a deleted component but didn't reconnect its
+    ///    downstream consumers.
+    ///  - A deleted consumer (in ObjectsRemoved) — every input source
+    ///    is by definition a missing wire since the consumer is gone.
+    ///
+    /// Source position resolves through two anchor maps: live
+    /// (component output param GUIDs and free-floating param GUIDs map
+    /// to right-edge of the owning visual) and ghost (deletion rects of
+    /// removed components). If neither lookup succeeds (cascade-deleted
+    /// source AND cascade-deleted consumer with no visible anchors),
+    /// the wire is silently dropped.
+    /// </summary>
+    private static void PaintMissingWires(
+        Graphics g,
+        DocumentDiff diff,
+        GH_Document doc,
+        Dictionary<string, IGH_DocumentObject> liveById,
+        Dictionary<string, RectangleF> deletionRects)
+    {
+        // Source-anchor lookup keyed by output PARAM GUID (the GUID
+        // that appears in downstream input.Sources). For live
+        // components/params we use the actual OutputGrip point
+        // (per-port wire connection point) so arrows land on the
+        // specific output port, not just the bounding rect's
+        // right-middle. Falls back to right-middle if grip data
+        // isn't available.
+        var liveOutputAnchors = new Dictionary<string, PointF>(StringComparer.Ordinal);
+        foreach (var obj in doc.Objects)
+        {
+            if (obj is IGH_Component comp)
+            {
+                foreach (var output in comp.Params.Output)
+                {
+                    var grip = output.Attributes?.OutputGrip ?? PointF.Empty;
+                    if (grip == PointF.Empty)
+                    {
+                        var b = comp.Attributes?.Bounds ?? RectangleF.Empty;
+                        if (b.IsEmpty) continue;
+                        grip = new PointF(b.Right, b.Y + b.Height / 2f);
+                    }
+                    liveOutputAnchors[output.InstanceGuid.ToString("D")] = grip;
+                }
+            }
+            else if (obj is IGH_Param param)
+            {
+                var grip = param.Attributes?.OutputGrip ?? PointF.Empty;
+                if (grip == PointF.Empty)
+                {
+                    var b = param.Attributes?.Bounds ?? RectangleF.Empty;
+                    if (b.IsEmpty) continue;
+                    grip = new PointF(b.Right, b.Y + b.Height / 2f);
+                }
+                liveOutputAnchors[param.InstanceGuid.ToString("D")] = grip;
+            }
+        }
+
+        var ghostOutputAnchors = new Dictionary<string, PointF>(StringComparer.Ordinal);
+        foreach (var removed in diff.ObjectsRemoved)
+        {
+            if (!deletionRects.TryGetValue(removed.InstanceGuid, out var rect)) continue;
+            var rightMid = new PointF(rect.Right, rect.Y + rect.Height / 2f);
+
+            if (removed.Outputs.Count > 0)
+            {
+                foreach (var output in removed.Outputs)
+                    ghostOutputAnchors[output.InstanceGuid] = rightMid;
+            }
+            else
+            {
+                ghostOutputAnchors[removed.InstanceGuid] = rightMid;
+            }
+        }
+
+        using var pen = new Pen(Color.FromArgb(220, 220, 40, 40), 1.8f)
+        {
+            DashStyle = DashStyle.Dash,
+            CustomEndCap = new AdjustableArrowCap(5f, 6f, true),
+        };
+
+        // Pass 1: live consumers with WiresChanged. The consumer anchor
+        // is the SPECIFIC input port's InputGrip (X / Y / Z on a Pt
+        // construct, etc.) - not just the consumer's left edge - so
+        // the arrow lands on the actual port the wire was attached to.
+        // The arrow persists until the input has SOMETHING wired into
+        // it - any source counts, not necessarily the originally-
+        // intended one. So if the user reconnects to a different
+        // source the arrow goes away just the same.
+        foreach (var change in diff.ObjectsModified)
+        {
+            if ((change.Kinds & ObjectChangeKind.WiresChanged) == 0) continue;
+            if (!liveById.TryGetValue(change.To.InstanceGuid, out var consumer)) continue;
+
+            var consumerInputs = LiveInputsOf(consumer);
+            for (var i = 0; i < change.From.Inputs.Count && i < change.To.Inputs.Count; i++)
+            {
+                // Anything plugged into this input clears the arrow.
+                if (change.To.Inputs[i].Sources.Count > 0) continue;
+
+                foreach (var src in change.From.Inputs[i].Sources)
+                {
+                    if (!TryFindWireAnchor(src, liveOutputAnchors, ghostOutputAnchors, out var srcAnchor)) continue;
+                    var consumerAnchor = LiveInputAnchor(consumer, consumerInputs, i);
+                    g.DrawLine(pen, srcAnchor, consumerAnchor);
+                }
+            }
+        }
+
+        // Pass 2: deleted consumers - every input source is missing.
+        // No live grip data (consumer is gone), so the arrow targets
+        // the left-middle of the ghost rect.
+        foreach (var removed in diff.ObjectsRemoved)
+        {
+            if (!deletionRects.TryGetValue(removed.InstanceGuid, out var rect)) continue;
+            var consumerAnchor = new PointF(rect.X, rect.Y + rect.Height / 2f);
+
+            foreach (var input in removed.Inputs)
+            {
+                foreach (var src in input.Sources)
+                {
+                    if (TryFindWireAnchor(src, liveOutputAnchors, ghostOutputAnchors, out var srcAnchor))
+                        g.DrawLine(pen, srcAnchor, consumerAnchor);
+                }
+            }
+        }
+    }
+
+    private static IList<IGH_Param>? LiveInputsOf(IGH_DocumentObject obj) => obj switch
+    {
+        IGH_Component comp => comp.Params.Input,
+        _ => null,
+    };
+
+    private static PointF LiveInputAnchor(IGH_DocumentObject consumer, IList<IGH_Param>? inputs, int index)
+    {
+        // Component input: per-port InputGrip.
+        if (inputs is not null && index >= 0 && index < inputs.Count)
+        {
+            var grip = inputs[index].Attributes?.InputGrip ?? PointF.Empty;
+            if (grip != PointF.Empty) return grip;
+        }
+        // Free-floating param: its own InputGrip.
+        if (consumer is IGH_Param freeParam && index == 0)
+        {
+            var grip = freeParam.Attributes?.InputGrip ?? PointF.Empty;
+            if (grip != PointF.Empty) return grip;
+        }
+        // Fallback: left-middle of the consumer's bounds.
+        var b = consumer.Attributes?.Bounds ?? RectangleF.Empty;
+        if (b.IsEmpty) return PointF.Empty;
+        return new PointF(b.X, b.Y + b.Height / 2f);
+    }
+
+    private static bool TryFindWireAnchor(
+        string sourceGuid,
+        Dictionary<string, PointF> liveOutputAnchors,
+        Dictionary<string, PointF> ghostOutputAnchors,
+        out PointF anchor)
+    {
+        if (liveOutputAnchors.TryGetValue(sourceGuid, out anchor)) return true;
+        return ghostOutputAnchors.TryGetValue(sourceGuid, out anchor);
+    }
+
+    private static RectangleF PaintDeletedGhost(Graphics g, CanonicalObject deleted)
     {
         RectangleF rect;
         if (deleted.Bounds is { } b && b.Width > 0 && b.Height > 0)
@@ -714,6 +1246,8 @@ public sealed class CanvasDiffOverlay
                 rect.X + (rect.Width - size.Width) / 2f,
                 rect.Bottom + 2f);
         }
+
+        return rect;
     }
 
     private static void PaintDeletedSlider(Graphics g, RectangleF rect, SliderValue? sv)
