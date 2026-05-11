@@ -66,6 +66,8 @@ public sealed class GLoomPanel : Panel
     private readonly CheckBox _filterMoved = new() { Text = "Moved", Checked = true };
     private readonly CheckBox _filterDeleted = new() { Text = "Deleted", Checked = true };
     private readonly Button _hoverModeButton = new() { Text = "Hover for details: OFF" };
+    private readonly Label _overlayRefLabel = new() { Text = "Overlay ref: HEAD" };
+    private readonly Button _overlayRefResetBtn = new() { Text = "Reset", Visible = false };
     private ContextMenu? _branchMenu;
 
     // History list
@@ -134,6 +136,25 @@ public sealed class GLoomPanel : Panel
             UpdateHoverButtonText();
         };
 
+        // Overlay reference indicator + reset. The reference is the
+        // commit the overlay compares the live state AGAINST. HEAD by
+        // default; user can pick any commit row's "compare on canvas"
+        // button to re-target. Reset returns to HEAD.
+        UpdateOverlayRefLabel();
+        _overlayRefResetBtn.Click += (_, _) => overlay.SetComparisonReference("HEAD");
+        overlay.ComparisonReferenceChanged += (_, _) =>
+        {
+            try
+            {
+                Application.Instance.AsyncInvoke(() =>
+                {
+                    UpdateOverlayRefLabel();
+                    Refresh();
+                });
+            }
+            catch { /* not yet attached to an Eto loop */ }
+        };
+
         UpdateFilterEnabled();
 
         var headerFont = new Font(SystemFont.Bold, 13);
@@ -200,17 +221,41 @@ public sealed class GLoomPanel : Panel
             Items = { _filterAdded, _filterModified, _filterMoved, _filterDeleted },
         };
 
+        var refRow = new StackLayout
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 6,
+            VerticalContentAlignment = Eto.Forms.VerticalAlignment.Center,
+            Items = { _overlayRefLabel, _overlayRefResetBtn },
+        };
+
         return new TableLayout
         {
-            Spacing = new Size(8, 0),
+            Spacing = new Size(8, 4),
             Padding = new Padding(16, 0, 0, 0),
             Rows =
             {
+                new TableRow(new TableCell(refRow, true)),
                 new TableRow(
                     new TableCell(filterStack, true),
                     new TableCell(_hoverModeButton, false)),
             },
         };
+    }
+
+    private void UpdateOverlayRefLabel()
+    {
+        var r = CanvasDiffOverlay.Instance.ComparisonReference;
+        if (r == "HEAD")
+        {
+            _overlayRefLabel.Text = "Overlay ref: HEAD";
+            _overlayRefResetBtn.Visible = false;
+        }
+        else
+        {
+            _overlayRefLabel.Text = "Overlay ref: " + (r.Length >= 7 ? r[..7] : r);
+            _overlayRefResetBtn.Visible = true;
+        }
     }
 
     private void UpdateHoverButtonText()
@@ -227,6 +272,7 @@ public sealed class GLoomPanel : Panel
         _filterMoved.Enabled = on;
         _filterDeleted.Enabled = on;
         _hoverModeButton.Enabled = on;
+        _overlayRefResetBtn.Enabled = on && CanvasDiffOverlay.Instance.ComparisonReference != "HEAD";
     }
 
     private static TableRow LabelRow(string caption, Control valueControl) =>
@@ -364,12 +410,14 @@ public sealed class GLoomPanel : Panel
             ? Path.GetRelativePath(s.RepoPath, s.CanonicalJsonFullPath)
             : null;
 
+        var currentRef = CanvasDiffOverlay.Instance.ComparisonReference;
         var visibleShas = new HashSet<string>(StringComparer.Ordinal);
         _historyContainer.Items.Clear();
         foreach (var c in commits)
         {
             visibleShas.Add(c.Sha);
             var isCurrent = currentSha is not null && c.Sha == currentSha;
+            var isActiveReference = currentRef == c.Sha;
             forksBySha.TryGetValue(c.Sha, out var parents);
             tagsBySha.TryGetValue(c.Sha, out var rowTags);
             var sha = c.Sha;
@@ -384,14 +432,21 @@ public sealed class GLoomPanel : Panel
                     return historicDoc is null ? null : DocumentDiff.Compute(historicDoc, currentDoc);
                 };
 
+            var rowIsActiveReference = isActiveReference;
             var row = new CommitRow(
                 info: c,
                 isCurrent: isCurrent,
+                isActiveReference: isActiveReference,
                 forkParents: parents,
                 tags: rowTags,
                 initiallyExpanded: _expandedShas.Contains(sha),
                 diffProvider: diffProvider,
                 onRestore: () => OnRestoreClicked(sha, c.Message),
+                onToggleReference: () =>
+                {
+                    var newRef = rowIsActiveReference ? "HEAD" : sha;
+                    CanvasDiffOverlay.Instance.SetComparisonReference(newRef);
+                },
                 onCreateTag: () => OnCreateTagClicked(sha, c.Message),
                 onDeleteTag: name => OnDeleteTagClicked(name),
                 onExpansionChanged: expanded =>
@@ -863,11 +918,13 @@ public sealed class GLoomPanel : Panel
         public CommitRow(
             GLoomRepository.CommitInfo info,
             bool isCurrent,
+            bool isActiveReference,
             IReadOnlyList<string>? forkParents,
             IReadOnlyList<GLoomRepository.TagInfo>? tags,
             bool initiallyExpanded,
             Func<DocumentDiff?> diffProvider,
             Action onRestore,
+            Action onToggleReference,
             Action onCreateTag,
             Action<string> onDeleteTag,
             Action<bool> onExpansionChanged)
@@ -891,6 +948,16 @@ public sealed class GLoomPanel : Panel
                 Size = new Size(26, 26),
             };
             restoreBtn.Click += (_, _) => onRestore();
+
+            var compareBtn = new Button
+            {
+                Text = isActiveReference ? "◉" : "◎",
+                ToolTip = isActiveReference
+                    ? "Stop comparing on canvas (return to HEAD)"
+                    : "Use this version as the overlay reference (compare live vs this on canvas)",
+                Size = new Size(26, 26),
+            };
+            compareBtn.Click += (_, _) => onToggleReference();
 
             // Drawer body = tags section + a slot we fill with the diff
             // section on first expansion (lazy so the panel doesn't pay
@@ -943,6 +1010,7 @@ public sealed class GLoomPanel : Panel
                         new TableCell(shaLabel, false),
                         new TableCell(msgLabel, true),
                         new TableCell(dateLabel, false),
+                        new TableCell(compareBtn, false),
                         new TableCell(restoreBtn, false),
                         new TableCell(toggleBtn, false)),
                 },
