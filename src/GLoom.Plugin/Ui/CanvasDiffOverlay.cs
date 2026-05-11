@@ -832,6 +832,17 @@ public sealed class CanvasDiffOverlay
         {
             ghostHeight = Math.Max(20f, Math.Min(liveBounds.Height, 40f));
         }
+        else if (oldKind == "gradient")
+        {
+            // Gradient bar + label below; mirror the live gradient's
+            // height so it reads as "the OLD gradient lived here".
+            ghostHeight = Math.Max(28f, Math.Min(liveBounds.Height, 44f));
+        }
+        else if (oldKind == "mdslider")
+        {
+            // Square box so the X/Y dot position reads correctly.
+            ghostHeight = Math.Max(40f, Math.Min(liveBounds.Width, 80f));
+        }
         else
         {
             ghostHeight = Math.Min(Math.Max(20f, liveBounds.Height), 28f);
@@ -862,6 +873,18 @@ public sealed class CanvasDiffOverlay
             g.DrawString(hsvaLabel, font, textBrush,
                 ghost.X + Math.Max(4f, (ghost.Width - size.Width) / 2f),
                 ghost.Bottom + 2f);
+            return ghost;
+        }
+
+        if (oldKind == "gradient" && oldData?.GradientStops is { Count: > 0 } stops)
+        {
+            PaintGradientBar(g, ghost, stops, Color.FromArgb(220, 230, 200, 0));
+            return ghost;
+        }
+
+        if (oldKind == "mdslider" && oldData?.MdSlider is { } md)
+        {
+            PaintMdSliderBox(g, ghost, md, Color.FromArgb(220, 230, 200, 0), Color.FromArgb(230, 180, 140, 0));
             return ghost;
         }
 
@@ -961,6 +984,8 @@ public sealed class CanvasDiffOverlay
             "boolean"   => $"was: {(from.BooleanState == true ? "True" : "False")}",
             "valuelist" => SummarizeValueListLabel(from, to),
             "color"     => $"was: #{from.ColorArgb}",
+            "gradient"  => null, // label drawn inside PaintGradientBar
+            "mdslider"  => null, // label drawn inside PaintMdSliderBox
             "data"      => "was: data",
             _           => null,
         };
@@ -968,6 +993,95 @@ public sealed class CanvasDiffOverlay
 
     private static string Truncate(string s, int max) =>
         s.Length <= max ? s : s.Substring(0, max - 1) + "…";
+
+    /// <summary>
+    /// Renders a horizontal gradient bar inside the given rect with the
+    /// supplied stops. Each pair of adjacent stops paints a linear
+    /// gradient region between their normalized positions (0..1). The
+    /// outline color is themed by caller - yellow for modification
+    /// ghosts, red for deletion ghosts.
+    /// </summary>
+    private static void PaintGradientBar(Graphics g, RectangleF rect, IReadOnlyList<GradientStop> stops, Color outlineColor)
+    {
+        if (stops.Count == 0) return;
+        var sorted = stops.OrderBy(s => s.Position).ToList();
+        var bar = new RectangleF(rect.X + 4f, rect.Y + 4f, rect.Width - 8f, rect.Height - 14f);
+        if (bar.Width <= 1f || bar.Height <= 1f) return;
+
+        // Solid fill before the first stop + after the last stop with
+        // the boundary colors so the visualisation reads continuously
+        // even when stops don't span the full 0..1 range.
+        var firstColor = TryParseArgb(sorted[0].ColorArgb) ?? Color.Gray;
+        var lastColor = TryParseArgb(sorted[^1].ColorArgb) ?? Color.Gray;
+        using (var firstFill = new SolidBrush(firstColor))
+            g.FillRectangle(firstFill, bar.X, bar.Y, (float)sorted[0].Position * bar.Width, bar.Height);
+        using (var lastFill = new SolidBrush(lastColor))
+        {
+            var lastStart = bar.X + (float)sorted[^1].Position * bar.Width;
+            g.FillRectangle(lastFill, lastStart, bar.Y, bar.Right - lastStart, bar.Height);
+        }
+
+        for (var i = 0; i < sorted.Count - 1; i++)
+        {
+            var a = sorted[i];
+            var b = sorted[i + 1];
+            var aColor = TryParseArgb(a.ColorArgb) ?? Color.Gray;
+            var bColor = TryParseArgb(b.ColorArgb) ?? Color.Gray;
+            var x1 = bar.X + Math.Clamp((float)a.Position, 0f, 1f) * bar.Width;
+            var x2 = bar.X + Math.Clamp((float)b.Position, 0f, 1f) * bar.Width;
+            if (x2 <= x1) continue;
+
+            using var lgb = new LinearGradientBrush(
+                new PointF(x1, bar.Y),
+                new PointF(x2 + 0.001f, bar.Y),
+                aColor, bColor);
+            g.FillRectangle(lgb, new RectangleF(x1, bar.Y, x2 - x1, bar.Height));
+        }
+
+        using var outline = new Pen(outlineColor, 1.5f);
+        g.DrawRectangle(outline, bar.X, bar.Y, bar.Width, bar.Height);
+
+        // Stop count label below.
+        using var font = new Font("Segoe UI", 8f);
+        using var textBrush = new SolidBrush(Color.FromArgb(220, outlineColor.R, outlineColor.G, outlineColor.B));
+        var label = $"was: {sorted.Count} stop{(sorted.Count == 1 ? "" : "s")}";
+        var size = g.MeasureString(label, font);
+        g.DrawString(label, font, textBrush,
+            rect.X + Math.Max(4f, (rect.Width - size.Width) / 2f),
+            rect.Bottom - size.Height - 2f);
+    }
+
+    /// <summary>
+    /// Renders a 2D box with a dot at the (X, Y) position so the user
+    /// reads the OLD MD slider position at a glance. The slider value
+    /// space is assumed to be normalized 0..1 on each axis (which is
+    /// GH's default); out-of-range values are clamped for display.
+    /// </summary>
+    private static void PaintMdSliderBox(Graphics g, RectangleF rect, MdSliderValue md, Color outlineColor, Color knobColor)
+    {
+        var box = RectangleF.Inflate(rect, -4f, -4f);
+        if (box.Width <= 2f || box.Height <= 2f) return;
+
+        using var fill = new SolidBrush(Color.FromArgb(40, outlineColor.R, outlineColor.G, outlineColor.B));
+        using var outline = new Pen(outlineColor, 1.5f);
+        g.FillRectangle(fill, box);
+        g.DrawRectangle(outline, box.X, box.Y, box.Width, box.Height);
+
+        var nx = (float)Math.Clamp(md.X, 0d, 1d);
+        var ny = (float)Math.Clamp(md.Y, 0d, 1d);
+        var dot = new PointF(box.X + nx * box.Width, box.Y + ny * box.Height);
+        using var knobBrush = new SolidBrush(knobColor);
+        const float r = 5f;
+        g.FillEllipse(knobBrush, dot.X - r, dot.Y - r, r * 2f, r * 2f);
+
+        using var font = new Font("Segoe UI", 7.5f);
+        using var textBrush = new SolidBrush(Color.FromArgb(220, outlineColor.R, outlineColor.G, outlineColor.B));
+        var label = $"was: ({md.X:0.##}, {md.Y:0.##})";
+        var size = g.MeasureString(label, font);
+        g.DrawString(label, font, textBrush,
+            rect.X + Math.Max(2f, (rect.Width - size.Width) / 2f),
+            rect.Bottom + 2f);
+    }
 
     /// <summary>
     /// Value-list overlay label: multi-line with the OLD selection on
@@ -1344,6 +1458,16 @@ public sealed class CanvasDiffOverlay
             case "boolean":   PaintDeletedBoolean(g, rect, deleted.Persistent.BooleanState);   break;
             case "valuelist": PaintDeletedValueList(g, rect, deleted.Persistent.ValueListSelected); break;
             case "color":     PaintDeletedSwatch(g, rect, deleted.Persistent.ColorArgb);       break;
+            case "gradient":
+                if (deleted.Persistent.GradientStops is { Count: > 0 } gs)
+                    PaintGradientBar(g, rect, gs, Color.FromArgb(220, 180, 30, 30));
+                break;
+            case "mdslider":
+                if (deleted.Persistent.MdSlider is { } dmd)
+                    PaintMdSliderBox(g, rect, dmd,
+                        Color.FromArgb(220, 180, 30, 30),
+                        Color.FromArgb(240, 220, 40, 40));
+                break;
         }
 
         var name = string.IsNullOrEmpty(deleted.Nickname) ? deleted.Name : deleted.Nickname;
