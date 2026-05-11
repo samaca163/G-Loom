@@ -145,20 +145,62 @@ public sealed record PersistentData(
         if (a is null || b is null) return true;
         if (a.Count != b.Count) return false;
 
-        // Compare by Name only. GH normalizes ValueListItem.Expression
-        // between sessions (raw input "4" can become "4L" after a
-        // solve, etc.), so a strict expression comparison produces
-        // false positives on "no change" diffs. We still surface
-        // added/removed items via name; same-name expression edits
-        // are accepted as a known blind spot until we have a reliable
-        // expression-normalization story.
+        // Compare by Name AND canonicalized Expression. GH rewrites
+        // Expression strings between sessions ("4" -> "4L" after a
+        // solve), but ValueListItem.Canonicalize strips numeric type
+        // suffixes and re-parses, so equivalent expressions agree.
+        // Real same-name expression edits (e.g. "4" -> "5") still
+        // surface correctly.
         for (var i = 0; i < a.Count; i++)
+        {
             if (!string.Equals(a[i].Name, b[i].Name, System.StringComparison.Ordinal)) return false;
+            if (!string.Equals(
+                ValueListItem.Canonicalize(a[i].Expression),
+                ValueListItem.Canonicalize(b[i].Expression),
+                System.StringComparison.Ordinal)) return false;
+        }
         return true;
     }
 }
 
-public sealed record ValueListItem(string Name, string Expression);
+public sealed record ValueListItem(string Name, string Expression)
+{
+    /// <summary>
+    /// Normalized form of an Expression for comparison purposes. GH
+    /// rewrites Expression strings between sessions ("4" can become
+    /// "4L" after the first solve, "5.0" into "5d", etc. - .NET numeric
+    /// literal suffixes leak in). Strip a single trailing L/D/F/M
+    /// suffix and re-parse as decimal so equivalent numeric expressions
+    /// canonicalize to the same string. Non-numeric expressions
+    /// (string literals, GUIDs, etc.) round-trip unchanged after a
+    /// trim. Used by PersistentData equality and the value-list diff
+    /// summary so a same-name expression edit is detected when it's a
+    /// REAL change, not GH's normalization noise.
+    /// </summary>
+    public static string Canonicalize(string expression)
+    {
+        if (string.IsNullOrEmpty(expression)) return string.Empty;
+        var trimmed = expression.Trim();
+
+        var withoutSuffix = trimmed.Length > 1 && IsNumericSuffix(trimmed[trimmed.Length - 1])
+            ? trimmed.Substring(0, trimmed.Length - 1)
+            : trimmed;
+
+        if (decimal.TryParse(
+            withoutSuffix,
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var d))
+        {
+            return d.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        return trimmed;
+    }
+
+    private static bool IsNumericSuffix(char c) =>
+        c is 'L' or 'l' or 'D' or 'd' or 'F' or 'f' or 'M' or 'm';
+}
 
 public sealed record SliderValue(
     decimal Value,

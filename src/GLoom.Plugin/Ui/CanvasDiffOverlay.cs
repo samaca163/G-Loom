@@ -971,11 +971,12 @@ public sealed class CanvasDiffOverlay
 
     /// <summary>
     /// Value-list overlay label: multi-line with the OLD selection on
-    /// the first line, item adds/removes on the second (when v4+ data
-    /// is available), and a mode change on the third (v5+). Each
-    /// section is omitted if it has nothing to report. Same-name
-    /// expression edits are not surfaced - GH normalizes Expression
-    /// between sessions, so flagging them would produce false positives.
+    /// the first line, item adds/removes/expression-edits on the second
+    /// (when v4+ data is available), and a mode change on the third
+    /// (v5+). Each section is omitted if it has nothing to report.
+    /// Expression comparison uses ValueListItem.Canonicalize so GH's
+    /// session-to-session normalization doesn't trigger a false
+    /// "expression changed" entry.
     /// </summary>
     private static string SummarizeValueListLabel(PersistentData from, PersistentData? to)
     {
@@ -986,15 +987,22 @@ public sealed class CanvasDiffOverlay
 
         if (from.ValueListItems is not null && to?.ValueListItems is not null)
         {
-            var oldNames = from.ValueListItems.Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
-            var newNames = to.ValueListItems.Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
+            var oldByName = from.ValueListItems.ToDictionary(i => i.Name, StringComparer.Ordinal);
+            var newByName = to.ValueListItems.ToDictionary(i => i.Name, StringComparer.Ordinal);
 
-            var added = newNames.Except(oldNames, StringComparer.Ordinal).Count();
-            var removed = oldNames.Except(newNames, StringComparer.Ordinal).Count();
+            var added = newByName.Keys.Except(oldByName.Keys, StringComparer.Ordinal).Count();
+            var removed = oldByName.Keys.Except(newByName.Keys, StringComparer.Ordinal).Count();
+            var changed = oldByName.Count(kv =>
+                newByName.TryGetValue(kv.Key, out var n)
+                && !string.Equals(
+                    ValueListItem.Canonicalize(n.Expression),
+                    ValueListItem.Canonicalize(kv.Value.Expression),
+                    StringComparison.Ordinal));
 
             var bits = new List<string>();
             if (added > 0) bits.Add($"+{added}");
             if (removed > 0) bits.Add($"-{removed}");
+            if (changed > 0) bits.Add($"~{changed}");
 
             if (bits.Count > 0) lines.Add("items: " + string.Join(" ", bits));
         }

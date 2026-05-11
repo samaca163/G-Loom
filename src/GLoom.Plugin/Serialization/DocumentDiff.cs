@@ -224,11 +224,11 @@ public sealed record DocumentDiff(
 
     /// <summary>
     /// Reports value-list changes: items added/removed (by Name),
-    /// selection changes, and display-mode changes (DropDown /
-    /// CheckList / Sequence / Cycle). Same-name expression edits are
-    /// intentionally NOT reported - GH normalizes Expression strings
-    /// between sessions ("4" can become "4L" after a solve) so a
-    /// strict expression comparison produces false positives.
+    /// same-name expression edits, selection changes, and display-mode
+    /// changes (DropDown / CheckList / Sequence / Cycle). Expression
+    /// comparison uses ValueListItem.Canonicalize so GH's session-
+    /// to-session normalization ("4" -> "4L" etc.) doesn't trigger
+    /// false positives.
     /// </summary>
     private static string SummarizeValueList(PersistentData from, PersistentData to)
     {
@@ -236,14 +236,21 @@ public sealed record DocumentDiff(
 
         if (from.ValueListItems is not null && to.ValueListItems is not null)
         {
-            var oldNames = from.ValueListItems.Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
-            var newNames = to.ValueListItems.Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
+            var oldByName = from.ValueListItems.ToDictionary(i => i.Name, StringComparer.Ordinal);
+            var newByName = to.ValueListItems.ToDictionary(i => i.Name, StringComparer.Ordinal);
 
-            var added = newNames.Except(oldNames, StringComparer.Ordinal).Count();
-            var removed = oldNames.Except(newNames, StringComparer.Ordinal).Count();
+            var added = newByName.Keys.Except(oldByName.Keys, StringComparer.Ordinal).Count();
+            var removed = oldByName.Keys.Except(newByName.Keys, StringComparer.Ordinal).Count();
+            var changed = oldByName.Count(kv =>
+                newByName.TryGetValue(kv.Key, out var n)
+                && !string.Equals(
+                    ValueListItem.Canonicalize(n.Expression),
+                    ValueListItem.Canonicalize(kv.Value.Expression),
+                    StringComparison.Ordinal));
 
             if (added > 0) parts.Add($"+{added} item{Plural(added)}");
             if (removed > 0) parts.Add($"-{removed} item{Plural(removed)}");
+            if (changed > 0) parts.Add($"~{changed} expression{Plural(changed)}");
         }
 
         var fromSel = from.ValueListSelected ?? Array.Empty<string>();
