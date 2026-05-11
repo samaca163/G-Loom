@@ -186,13 +186,42 @@ Tools available on the machine: `dotnet` 8.0.200 at `C:\Program Files\dotnet\`, 
 - **Mode-aware per-tag schema** (v2): always-available `notes` plus optional `aec` (phase / submittal / sheet set / notes), `product` (sku / variant / notes), and `release` (version / notes) sub-records. Tag creation uses a custom Eto dialog with collapsible sections; only expanded sections contribute to the tag. v1 messages still parse cleanly because new params have `= null` defaults (`d73ace4`)
 - **Tag-name auto-rewrite** (space → hyphen) in the dialog so the user never hits git's check-ref-format wall (`d73ace4`)
 
-### Phase 3 — Underway (next concrete work)
+### Phase 3 — Done (through `e74e811`)
 
-- **Visual diff** — show which components, wires, and persistent values changed between two commits (typically `current` vs a chosen commit / branch / tag). The thesis-honest version is on-canvas: added components in green, removed in red, modified in yellow, with rerouted wires highlighted. A first cut may be a structural inspector inside the drawer (text-mode listing of additions / deletions / param changes) before the on-canvas overlay lands.
+**Phase 1b** (`620e0cb`) — Canonical JSON serializer extended with persistent values: typed handlers for sliders (value, range, decimals, type), panels (text), boolean toggles, value lists (selected items), color swatches; SHA-256 digest fallback for any other persistent-typed param holding internalized data. Schema v2.
 
-### Beyond Phase 3
+**Diff engine** (`4da6575`) — `DocumentDiff.Compute(from, to)` returns categorized lists (`ObjectsAdded` / `ObjectsRemoved` / `ObjectsModified`) with `ObjectChangeKind` flags (Renamed / Moved / WiresChanged / PersistentChanged) and per-change human-readable summaries.
 
-See README's Roadmap section. Roughly: team collaboration (Phase 4) → merge with on-canvas conflict UI (Phase 5) → scoped branches with promote/refresh (Phase 6) → LFS for heavy geometry (Phase 7) → audit, distribution, polish (Phase 8).
+**Drawer inspector** (`9d310d9`) — Each non-current commit's drawer surfaces a "Changes from this version to current" section with categorized lists and short summaries. Lazy-loaded on first expand; the right-hand-side current `.gloom.json` is parsed once per panel refresh.
+
+**Schema progression for the canvas overlay** (`cd8d84b`, `e358585`):
+- v3 — `CanonicalObject.Bounds` so deletion ghosts can render at accurate size.
+- v4 — `PersistentData.ValueListItems` (full Name + Expression list) so value-list content edits surface.
+- v5 — `PersistentData.ValueListMode` so DropDown / CheckList / Sequence / Cycle changes surface.
+
+All optional fields with `= null` defaults; older documents parse cleanly and older plugin builds ignore additions.
+
+**On-canvas diff overlay** (`a48f456`) — Singleton paints highlights atop GH canvas: green halos for added, yellow for modified, blue for moved-only, red kind-aware ghosts for deleted (the deleted slider's track + value, the deleted panel's text, the deleted swatch's actual color, etc.). Movement trail = dashed translucent old-bounds rect + solid arrow from old center to new center. Persistent ghost-below per kind (slider track + knob + range labels with orange-when-changed; panel hover preview ABOVE for wired panels only; color swatch with HSVA readout; value list multi-line summary). Wired-panel filter — standalone panels are scratchpad notes, ignored. Toggle in the panel + four action filters (Added / Modified / Moved / Deleted) + Hover-for-details mode (halos always; extras on hover only). Throttled diff recompute (250ms). Defaults to ON.
+
+**Compare-against-any-commit + right-click restore + missing-wire arrows** (`709017a`, `27e3c65`, `541565e`):
+- Per-row `◎` / `◉` button sets that commit as the overlay's `ComparisonReference`. Reference label + Reset button in the panel header. File/repo switch resets to HEAD; in-place edits do not.
+- Win32 NativeWindow intercepts `WM_RBUTTONDOWN` so right-clicking a ghost shows our single-item restore menu and suppresses GH's normal context menu (non-ghost right-clicks pass through unchanged). Restore actions cover modified content (slider/panel/boolean/color), moved (pivot), and deleted (recreate via `Instances.ComponentServer.EmitObject`, restoring InstanceGuid, pivot, input + output param GUIDs, persistent state, and reconnecting input wires whose source still exists). All wrapped in `doc.UndoUtil.RecordEvent`.
+- Red dashed bezier from each missing source to the consumer's specific input port (uses `InputGrip` / `OutputGrip` for per-port targeting). Arrow persists until ANY source is plugged into the input, not just the originally-intended one. Solid green bezier overlays each NEW wire (in to-doc but not from-doc) on top of GH's wire path. Per-output-port anchors distribute along ghost edges so multi-output deleted components render distinct arrow starts.
+
+**Same-name value-list expression-edit detection** (`e74e811`) — `ValueListItem.Canonicalize` strips numeric type suffixes (L / D / F / M) and re-parses as decimal so GH's session-to-session normalization ("4" → "4L") doesn't fire false positives. Real expression edits ("4" → "5") still surface as `~N expression` entries.
+
+**Deferred Phase 3 items** (acknowledged limitations):
+- Structured ghosts for MD slider + gradient — currently fall through to opaque digest. Needs verifying GH SDK type names live before implementing; tracked for a future session.
+- Restoring downstream consumer wires when restoring a deleted component — visible via missing-wire arrows; the user manually rewires (the visualization is honest and predictable).
+- Restore-on-add (deleting a newly-added component) — not implemented; UX risk of accidentally trashing work.
+
+### Phase 4 — Underway (next concrete work)
+
+- **Team collaboration** — remotes, push/pull from the panel, basic conflict surfacing. The thesis-honest version: two designers iterating the same recipe across machines, where recipe-versioning starts paying real dividends over Revit's central-file model.
+
+### Beyond Phase 4
+
+See README's Roadmap section. Roughly: merge with on-canvas conflict UI (Phase 5) → scoped branches with promote/refresh (Phase 6) → LFS for heavy geometry (Phase 7) → audit, distribution, polish (Phase 8).
 
 ## Pointers to the user's persistent memory
 
