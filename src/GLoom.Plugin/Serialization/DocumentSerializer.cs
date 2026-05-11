@@ -22,7 +22,7 @@ namespace GLoom.Serialization;
 /// </summary>
 public static class DocumentSerializer
 {
-    private const int CurrentSchemaVersion = 5;
+    private const int CurrentSchemaVersion = 6;
 
     public static CanonicalDocument Serialize(GH_Document document)
     {
@@ -171,12 +171,22 @@ public static class DocumentSerializer
                     ColorArgb: swatch.SwatchColour.ToArgb().ToString("X8"));
         }
 
+        // Long-tail typed capture via reflection - lets us extract
+        // structured data from GH_GradientControl and MD slider
+        // controls without referencing uncertain SDK type names at
+        // compile time. If the reflection probe doesn't find the
+        // expected shape, fall through to the digest fallback below.
+        var gradient = TryCaptureGradientReflective(param);
+        if (gradient is not null) return gradient;
+
+        var md = TryCaptureMdSliderReflective(param);
+        if (md is not null) return md;
+
         // Generic fallback for any persistent-typed param holding
-        // internalized data (MD slider, gradient, baked geometry on a
-        // Curve param, etc.). PersistentDataCount lives on the generic
-        // GH_PersistentParam<T>; rather than reflect across all the typed
-        // variants, we ask via dynamic and treat zero/exception as
-        // "nothing to capture".
+        // internalized data (baked geometry on a Curve param, etc.).
+        // PersistentDataCount lives on the generic GH_PersistentParam<T>;
+        // rather than reflect across all the typed variants, we ask
+        // via dynamic and treat zero/exception as "nothing to capture".
         var count = TryGetPersistentDataCount(param);
         if (count > 0)
         {
@@ -186,6 +196,114 @@ public static class DocumentSerializer
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Reflection-based gradient capture. Matches GH_GradientControl by
+    /// simple type name and reads the gradient stop list off whichever
+    /// of Grips / Stops / Anchors actually exists. Each stop's Parameter
+    /// (position) and Colour (color) are pulled by their conventional
+    /// GH names. Returns null on any mismatch so the digest fallback
+    /// kicks in.
+    /// </summary>
+    private static PersistentData? TryCaptureGradientReflective(IGH_Param param)
+    {
+        var typeName = param.GetType().Name;
+        if (typeName != "GH_GradientControl") return null;
+
+        try
+        {
+            var gradientProp = param.GetType().GetProperty("Gradient");
+            var gradient = gradientProp?.GetValue(param);
+            if (gradient is null) return null;
+
+            var gripsProp = gradient.GetType().GetProperty("Grips")
+                         ?? gradient.GetType().GetProperty("Stops")
+                         ?? gradient.GetType().GetProperty("Anchors");
+            if (gripsProp?.GetValue(gradient) is not System.Collections.IEnumerable grips) return null;
+
+            var stops = new List<GradientStop>();
+            foreach (var grip in grips)
+            {
+                var gripType = grip.GetType();
+                var paramP = gripType.GetProperty("Parameter") ?? gripType.GetProperty("Position");
+                var colourP = gripType.GetProperty("Colour") ?? gripType.GetProperty("Color");
+                if (paramP is null || colourP is null) continue;
+
+                var p = paramP.GetValue(grip);
+                var c = colourP.GetValue(grip);
+                if (c is not System.Drawing.Color color) continue;
+                var position = p switch
+                {
+                    double dp => dp,
+                    float fp => fp,
+                    decimal mp => (double)mp,
+                    _ => double.NaN,
+                };
+                if (double.IsNaN(position)) continue;
+                stops.Add(new GradientStop(position, color.ToArgb().ToString("X8")));
+            }
+
+            if (stops.Count == 0) return null;
+            stops.Sort((a, b) => a.Position.CompareTo(b.Position));
+            return new PersistentData(Kind: "gradient", GradientStops: stops);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Reflection-based MD slider capture. Matches a handful of plausible
+    /// type names (GH naming varies: GH_MdSlider, GH_MDSlider,
+    /// GH_MultiDimensionalSlider) and pulls a 2D position off whichever
+    /// of CurrentValue / Value / Position actually exposes one. Returns
+    /// null on any mismatch.
+    /// </summary>
+    private static PersistentData? TryCaptureMdSliderReflective(IGH_Param param)
+    {
+        var typeName = param.GetType().Name;
+        if (typeName is not ("GH_MdSlider" or "GH_MDSlider" or "GH_MultiDimensionalSlider"))
+            return null;
+
+        try
+        {
+            var paramType = param.GetType();
+            var valueProp = paramType.GetProperty("CurrentValue")
+                         ?? paramType.GetProperty("Value")
+                         ?? paramType.GetProperty("Position");
+            var value = valueProp?.GetValue(param);
+            if (value is null) return null;
+
+            var valueType = value.GetType();
+            var xProp = valueType.GetProperty("X");
+            var yProp = valueType.GetProperty("Y");
+            var x = xProp?.GetValue(value);
+            var y = yProp?.GetValue(value);
+
+            var xd = x switch
+            {
+                double dx => dx,
+                float fx => fx,
+                decimal mx => (double)mx,
+                _ => double.NaN,
+            };
+            var yd = y switch
+            {
+                double dy => dy,
+                float fy => fy,
+                decimal my => (double)my,
+                _ => double.NaN,
+            };
+            if (double.IsNaN(xd) || double.IsNaN(yd)) return null;
+
+            return new PersistentData(Kind: "mdslider", MdSlider: new MdSliderValue(xd, yd));
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static int TryGetPersistentDataCount(IGH_Param param)

@@ -3,15 +3,20 @@ using System.Collections.Generic;
 namespace GLoom.Serialization;
 
 /// <summary>
-/// Schema v5 of the canonical, diff-friendly representation of a Grasshopper
+/// Schema v6 of the canonical, diff-friendly representation of a Grasshopper
 /// document. Designed for stability across saves: deterministic field order,
 /// objects sorted by InstanceGuid, sources sorted lexicographically.
 ///
-/// v5 adds the optional <see cref="PersistentData.ValueListMode"/> field
-/// so a value-list display-mode change (DropDown / CheckList / Sequence
-/// / Cycle) shows up in the diff. v4 added ValueListItems; v3 added
-/// Bounds; v2 added Persistent. Older documents parse cleanly because
-/// all new fields have `= null` defaults.
+/// v6 adds optional structured representations for two long-tail
+/// persistent kinds: <see cref="PersistentData.GradientStops"/> (sorted
+/// position+colour list for GH_GradientControl) and
+/// <see cref="PersistentData.MdSlider"/> (X/Y position for MD slider).
+/// Capture is reflection-based at the serializer layer so the schema
+/// doesn't have to reference uncertain SDK type names; failures fall
+/// through to the existing opaque-digest path.
+/// v5 added ValueListMode; v4 added ValueListItems; v3 added Bounds;
+/// v2 added Persistent. Older documents parse cleanly because all new
+/// fields have `= null` defaults.
 /// </summary>
 public sealed record CanonicalDocument(
     int SchemaVersion,
@@ -77,6 +82,8 @@ public sealed record PersistentData(
     IReadOnlyList<ValueListItem>? ValueListItems = null,
     string? ValueListMode = null,
     string? ColorArgb = null,
+    IReadOnlyList<GradientStop>? GradientStops = null,
+    MdSliderValue? MdSlider = null,
     string? Digest = null)
 {
     // Records use reference equality for collection fields, which would
@@ -96,6 +103,8 @@ public sealed record PersistentData(
             && SequenceEqual(ValueListItems, other.ValueListItems)
             && LenientStringEquals(ValueListMode, other.ValueListMode)
             && ColorArgb == other.ColorArgb
+            && SequenceEqualStops(GradientStops, other.GradientStops)
+            && MdSlider == other.MdSlider
             && Digest == other.Digest;
     }
 
@@ -121,8 +130,22 @@ public sealed record PersistentData(
             foreach (var i in ValueListItems) hc.Add(i);
         hc.Add(ValueListMode);
         hc.Add(ColorArgb);
+        if (GradientStops is not null)
+            foreach (var s in GradientStops) hc.Add(s);
+        hc.Add(MdSlider);
         hc.Add(Digest);
         return hc.ToHashCode();
+    }
+
+    private static bool SequenceEqualStops(IReadOnlyList<GradientStop>? a, IReadOnlyList<GradientStop>? b)
+    {
+        // Lenient on null - same pattern as other later-schema fields.
+        if (ReferenceEquals(a, b)) return true;
+        if (a is null || b is null) return true;
+        if (a.Count != b.Count) return false;
+        for (var i = 0; i < a.Count; i++)
+            if (a[i] != b[i]) return false;
+        return true;
     }
 
     private static bool SequenceEqualOrdinal(IReadOnlyList<string>? a, IReadOnlyList<string>? b)
@@ -208,3 +231,7 @@ public sealed record SliderValue(
     decimal Max,
     int Decimals,
     string Type);
+
+public sealed record GradientStop(double Position, string ColorArgb);
+
+public sealed record MdSliderValue(double X, double Y);

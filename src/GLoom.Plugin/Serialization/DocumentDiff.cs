@@ -217,9 +217,24 @@ public sealed record DocumentDiff(
             "boolean" => $"toggle {from.BooleanState} → {to.BooleanState}",
             "valuelist" => SummarizeValueList(from, to),
             "color" => $"color {from.ColorArgb} → {to.ColorArgb}",
+            "gradient" => SummarizeGradient(from, to),
+            "mdslider" when from.MdSlider is { } fm && to.MdSlider is { } tm
+                => $"md slider ({fm.X:0.##}, {fm.Y:0.##}) → ({tm.X:0.##}, {tm.Y:0.##})",
+            "mdslider" => "md slider changed",
             "data" => "data changed",
             _ => null,
         };
+    }
+
+    private static string SummarizeGradient(PersistentData from, PersistentData to)
+    {
+        if (from.GradientStops is null || to.GradientStops is null) return "gradient changed";
+        var fc = from.GradientStops.Count;
+        var tc = to.GradientStops.Count;
+        if (fc != tc) return $"gradient stops {fc} → {tc}";
+        // Same count - either positions or colours shifted; not worth
+        // a finer breakdown for the headline summary line.
+        return "gradient stops shifted";
     }
 
     /// <summary>
