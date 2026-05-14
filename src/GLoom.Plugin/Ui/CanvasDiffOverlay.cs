@@ -163,7 +163,11 @@ public sealed class CanvasDiffOverlay
         RhinoApp.WriteLine($"[G-Loom] Diff overlay {(enabled ? "on" : "off")}.");
     }
 
-    private readonly Dictionary<GH_Canvas, GhostRightClickHook> _rightClickHooks = new();
+    // Typed as object so the field declaration doesn't drag the
+    // GhostRightClickHook type (NativeWindow-derived) into the JIT for
+    // the constructor on macOS, where NativeWindow isn't part of
+    // Rhino's WinForms shim and would fail to load.
+    private readonly Dictionary<GH_Canvas, object> _rightClickHooks = new();
 
     private void HookCanvas(GH_Canvas canvas)
     {
@@ -178,6 +182,15 @@ public sealed class CanvasDiffOverlay
         // A NativeWindow attached to the canvas's HWND sees the message
         // first; if our hit-test matches a ghost we handle the click
         // ourselves and don't forward, suppressing GH's menu cleanly.
+        // macOS Rhino's WinForms shim doesn't ship NativeWindow at all,
+        // so on non-Windows we skip the hook (right-click restore
+        // becomes unavailable there until we add a Cocoa-side path).
+        if (OperatingSystem.IsWindows())
+            InstallWindowsRightClickHook(canvas);
+    }
+
+    private void InstallWindowsRightClickHook(GH_Canvas canvas)
+    {
         if (!_rightClickHooks.ContainsKey(canvas))
             _rightClickHooks[canvas] = new GhostRightClickHook(this, canvas);
     }
