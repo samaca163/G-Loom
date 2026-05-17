@@ -89,6 +89,11 @@ public static class DocumentSerializer
             Pivot: ExtractPivot(component),
             Inputs: inputs,
             Outputs: outputs,
+            // GH_GradientControl is a component, not a free-floating
+            // param, so its persistent gradient data must be captured
+            // on this path too. The probe is a no-op for everything
+            // else; it pays a single type-name check per component.
+            Persistent: TryCaptureGradientReflective(component),
             Bounds: ExtractBounds(component));
     }
 
@@ -198,60 +203,262 @@ public static class DocumentSerializer
         return null;
     }
 
+    private static readonly HashSet<string> s_loggedGradientShapes = new();
+
     /// <summary>
-    /// Reflection-based gradient capture. Matches GH_GradientControl by
-    /// simple type name and reads the gradient stop list off whichever
-    /// of Grips / Stops / Anchors actually exists. Each stop's Parameter
-    /// (position) and Colour (color) are pulled by their conventional
-    /// GH names. Returns null on any mismatch so the digest fallback
-    /// kicks in.
+    /// Structural gradient capture — gates on a fuzzy type-name match
+    /// (anything containing "gradient"), then walks the param's public
+    /// instance properties for any object exposing an enumerable of
+    /// stop-like items (each with a numeric position and a Color).
+    /// Robust to naming variants across GH versions and third-party
+    /// gradient-like components. On a type-name match that still
+    /// yields no stops, logs the type + property shape ONCE per type
+    /// so the user can hand us actionable data to fix the probe.
     /// </summary>
-    private static PersistentData? TryCaptureGradientReflective(IGH_Param param)
+    private static PersistentData? TryCaptureGradientReflective(object obj)
     {
-        var typeName = param.GetType().Name;
-        if (typeName != "GH_GradientControl") return null;
+        if (obj is null) return null;
+        var typeName = obj.GetType().Name;
+        if (typeName.IndexOf("gradient", StringComparison.OrdinalIgnoreCase) < 0) return null;
 
         try
         {
-            var gradientProp = param.GetType().GetProperty("Gradient");
-            var gradient = gradientProp?.GetValue(param);
-            if (gradient is null) return null;
+            var stops = TryExtractStops(obj);
+            if (stops is null && obj.GetType().GetProperty("Gradient")?.GetValue(obj) is { } inner)
+                stops = TryExtractStops(inner);
 
-            var gripsProp = gradient.GetType().GetProperty("Grips")
-                         ?? gradient.GetType().GetProperty("Stops")
-                         ?? gradient.GetType().GetProperty("Anchors");
-            if (gripsProp?.GetValue(gradient) is not System.Collections.IEnumerable grips) return null;
-
-            var stops = new List<GradientStop>();
-            foreach (var grip in grips)
+            if (stops is { Count: > 0 })
             {
-                var gripType = grip.GetType();
-                var paramP = gripType.GetProperty("Parameter") ?? gripType.GetProperty("Position");
-                var colourP = gripType.GetProperty("Colour") ?? gripType.GetProperty("Color");
-                if (paramP is null || colourP is null) continue;
-
-                var p = paramP.GetValue(grip);
-                var c = colourP.GetValue(grip);
-                if (c is not System.Drawing.Color color) continue;
-                var position = p switch
-                {
-                    double dp => dp,
-                    float fp => fp,
-                    decimal mp => (double)mp,
-                    _ => double.NaN,
-                };
-                if (double.IsNaN(position)) continue;
-                stops.Add(new GradientStop(position, color.ToArgb().ToString("X8")));
+                stops.Sort((a, b) => a.Position.CompareTo(b.Position));
+                return new PersistentData(Kind: "gradient", GradientStops: stops);
             }
 
-            if (stops.Count == 0) return null;
-            stops.Sort((a, b) => a.Position.CompareTo(b.Position));
-            return new PersistentData(Kind: "gradient", GradientStops: stops);
+            if (s_loggedGradientShapes.Add(typeName))
+            {
+                Rhino.RhinoApp.WriteLine($"[G-Loom] gradient probe miss on {typeName}");
+                DumpShape(obj, "  outer");
+
+                var gradientProp = obj.GetType().GetProperty("Gradient");
+                var inner2 = gradientProp?.GetValue(obj);
+                if (inner2 is not null)
+                {
+                    Rhino.RhinoApp.WriteLine($"  inner Gradient type={inner2.GetType().Name}");
+                    DumpShape(inner2, "  inner");
+                }
+            }
         }
-        catch
+        catch (Exception ex)
         {
+            Rhino.RhinoApp.WriteLine($"[G-Loom] gradient probe threw: {ex.GetType().Name}: {ex.Message}");
+        }
+        return null;
+    }
+
+    private static List<GradientStop>? TryExtractStops(object obj)
+        => ExtractStopsViaGripIndex(obj) ?? ExtractStopsFrom(obj) ?? WalkForStops(obj);
+
+    /// GH_Gradient exposes its stops as an indexed VB property
+    /// (`Grip(i)` / `get_Grip(int)`) paired with a `GripCount` scalar.
+    /// Reflection's property walk can't see indexed accessors, so we
+    /// target them by exact name. Safe: it's a getter we name
+    /// explicitly, not arbitrary method iteration.
+    private static List<GradientStop>? ExtractStopsViaGripIndex(object obj)
+    {
+        var t = obj.GetType();
+        var countProp = t.GetProperty("GripCount");
+        if (countProp is null) return null;
+
+        int count;
+        try { count = countProp.GetValue(obj) is int n ? n : 0; }
+        catch { return null; }
+        if (count <= 0) return null;
+
+        // Indexed property (preferred — VB compiles `Property Grip(i)` to
+        // an indexed property in .NET metadata), then named accessor
+        // methods as fallback.
+        const System.Reflection.BindingFlags F = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance;
+        var gripIndexProp = t.GetProperties(F).FirstOrDefault(p =>
+            p.Name == "Grip" &&
+            p.GetIndexParameters() is { Length: 1 } ix &&
+            ix[0].ParameterType == typeof(int));
+        var gripMethod = gripIndexProp is null
+            ? (t.GetMethod("get_Grip", new[] { typeof(int) })
+            ?? t.GetMethod("Grip",     new[] { typeof(int) })
+            ?? t.GetMethod("get_Item", new[] { typeof(int) })
+            ?? t.GetMethod("Item",     new[] { typeof(int) }))
+            : null;
+        if (gripIndexProp is null && gripMethod is null)
+        {
+            Rhino.RhinoApp.WriteLine($"[G-Loom] gradient probe: GripCount={count} but no grip accessor on {t.Name}");
             return null;
         }
+
+        var stops = new List<GradientStop>(count);
+        for (int i = 0; i < count; i++)
+        {
+            object? grip;
+            try
+            {
+                grip = gripIndexProp is not null
+                    ? gripIndexProp.GetValue(obj, new object[] { i })
+                    : gripMethod!.Invoke(obj, new object[] { i });
+            }
+            catch (Exception ex)
+            {
+                Rhino.RhinoApp.WriteLine($"[G-Loom] gradient probe: grip[{i}] read threw {ex.GetType().Name}");
+                return null;
+            }
+            if (grip is null) continue;
+
+            var gt = grip.GetType();
+            var posP = gt.GetProperty("Parameter") ?? gt.GetProperty("Position")
+                    ?? gt.GetProperty("T")         ?? gt.GetProperty("Anchor");
+            // GH_Grip uses ColourLeft/ColourRight (for gradient interpolation
+            // direction). Either side reads the stop's color; prefer Left.
+            var colP = gt.GetProperty("ColourLeft") ?? gt.GetProperty("ColorLeft")
+                    ?? gt.GetProperty("Colour")     ?? gt.GetProperty("Color")
+                    ?? gt.GetProperty("ColourRight")?? gt.GetProperty("ColorRight");
+            if (posP is null || colP is null)
+            {
+                if (s_loggedGradientShapes.Add(gt.Name + ".grip"))
+                {
+                    Rhino.RhinoApp.WriteLine($"[G-Loom] gradient probe: grip type={gt.Name} pos={(posP is null ? "null" : posP.Name)} col={(colP is null ? "null" : colP.Name)}");
+                    DumpShape(grip, "  grip");
+                }
+                return null;
+            }
+
+            object? rawPos, rawCol;
+            try { rawPos = posP.GetValue(grip); rawCol = colP.GetValue(grip); }
+            catch { return null; }
+            if (rawCol is not Color color)
+            {
+                Rhino.RhinoApp.WriteLine($"[G-Loom] gradient probe: grip colour is {rawCol?.GetType().Name ?? "null"}, not System.Drawing.Color");
+                return null;
+            }
+
+            double position = rawPos switch
+            {
+                double d  => d,
+                float f   => f,
+                decimal m => (double)m,
+                int ii    => ii,
+                _         => double.NaN,
+            };
+            if (double.IsNaN(position))
+            {
+                Rhino.RhinoApp.WriteLine($"[G-Loom] gradient probe: grip position is {rawPos?.GetType().Name ?? "null"}, not a number");
+                return null;
+            }
+
+            stops.Add(new GradientStop(position, color.ToArgb().ToString("X8")));
+        }
+        if (stops.Count > 0 && s_loggedGradientShapes.Add(t.Name + ".ok"))
+            Rhino.RhinoApp.WriteLine($"[G-Loom] gradient probe: extracted {stops.Count} stops from {t.Name}");
+        return stops.Count > 0 ? stops : null;
+    }
+
+    private static List<GradientStop>? WalkForStops(object root)
+    {
+        foreach (var value in EnumerateMemberValues(root))
+        {
+            if (value is null) continue;
+            var stops = ExtractStopsFrom(value);
+            if (stops is { Count: > 0 }) return stops;
+        }
+        return null;
+    }
+
+    // Read-only reflection walk: properties + fields only. Never
+    // invokes methods — many GH SDK no-arg methods have side effects
+    // (Solve / ExpireSolution / lazy icon init) and invoking them
+    // during a paint-cycle diff broke GH's drawing pipeline.
+    private static IEnumerable<object?> EnumerateMemberValues(object root)
+    {
+        var t = root.GetType();
+        const System.Reflection.BindingFlags F = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance;
+
+        foreach (var p in t.GetProperties(F))
+        {
+            if (p.GetIndexParameters().Length > 0) continue;
+            object? v = null; bool ok = false;
+            try { v = p.GetValue(root); ok = true; } catch { }
+            if (ok) yield return v;
+        }
+        foreach (var f in t.GetFields(F))
+        {
+            object? v = null; bool ok = false;
+            try { v = f.GetValue(root); ok = true; } catch { }
+            if (ok) yield return v;
+        }
+    }
+
+    private static void DumpShape(object obj, string prefix)
+    {
+        var t = obj.GetType();
+        const System.Reflection.BindingFlags F = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance;
+        var props = string.Join(", ", t.GetProperties(F).Select(p => $"{p.Name}:{p.PropertyType.Name}"));
+        var fields = string.Join(", ", t.GetFields(F).Select(f => $"{f.Name}:{f.FieldType.Name}"));
+        Rhino.RhinoApp.WriteLine($"{prefix} props=[{props}]");
+        if (!string.IsNullOrEmpty(fields)) Rhino.RhinoApp.WriteLine($"{prefix} fields=[{fields}]");
+    }
+
+    /// <summary>
+    /// Looks for an IEnumerable property on <paramref name="obj"/> whose
+    /// items each expose a numeric position and a System.Drawing.Color.
+    /// Returns the first viable list, or null. Works whether obj IS the
+    /// collection or merely holds one.
+    /// </summary>
+    private static List<GradientStop>? ExtractStopsFrom(object obj)
+    {
+        if (obj is System.Collections.IEnumerable directList && obj is not string)
+        {
+            var direct = TryReadStops(directList);
+            if (direct is { Count: > 0 }) return direct;
+        }
+
+        foreach (var value in EnumerateMemberValues(obj))
+        {
+            if (value is null) continue;
+            if (value is not System.Collections.IEnumerable items || value is string) continue;
+
+            var stops = TryReadStops(items);
+            if (stops is { Count: > 0 }) return stops;
+        }
+        return null;
+    }
+
+    private static List<GradientStop>? TryReadStops(System.Collections.IEnumerable items)
+    {
+        var stops = new List<GradientStop>();
+        foreach (var item in items)
+        {
+            if (item is null) continue;
+            var t = item.GetType();
+            var posP = t.GetProperty("Parameter") ?? t.GetProperty("Position")
+                    ?? t.GetProperty("T")        ?? t.GetProperty("Anchor");
+            var colP = t.GetProperty("Colour") ?? t.GetProperty("Color")
+                    ?? t.GetProperty("Value");
+            if (posP is null || colP is null) return null;
+
+            object? rawPos, rawCol;
+            try { rawPos = posP.GetValue(item); rawCol = colP.GetValue(item); }
+            catch { return null; }
+            if (rawCol is not Color color) return null;
+
+            double position = rawPos switch
+            {
+                double d => d,
+                float f  => f,
+                decimal m => (double)m,
+                int i    => i,
+                _        => double.NaN,
+            };
+            if (double.IsNaN(position)) return null;
+
+            stops.Add(new GradientStop(position, color.ToArgb().ToString("X8")));
+        }
+        return stops;
     }
 
     /// <summary>
