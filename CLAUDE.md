@@ -208,16 +208,22 @@ All optional fields with `= null` defaults; older documents parse cleanly and ol
 - Win32 NativeWindow intercepts `WM_RBUTTONDOWN` so right-clicking a ghost shows our single-item restore menu and suppresses GH's normal context menu (non-ghost right-clicks pass through unchanged). Restore actions cover modified content (slider/panel/boolean/color), moved (pivot), and deleted (recreate via `Instances.ComponentServer.EmitObject`, restoring InstanceGuid, pivot, input + output param GUIDs, persistent state, and reconnecting input wires whose source still exists). All wrapped in `doc.UndoUtil.RecordEvent`.
 - Red dashed bezier from each missing source to the consumer's specific input port (uses `InputGrip` / `OutputGrip` for per-port targeting). Arrow persists until ANY source is plugged into the input, not just the originally-intended one. Solid green bezier overlays each NEW wire (in to-doc but not from-doc) on top of GH's wire path. Per-output-port anchors distribute along ghost edges so multi-output deleted components render distinct arrow starts.
 
-**Same-name value-list expression-edit detection** (`e74e811`) — `ValueListItem.Canonicalize` strips numeric type suffixes (L / D / F / M) and re-parses as decimal so GH's session-to-session normalization ("4" → "4L") doesn't fire false positives. Real expression edits ("4" → "5") still surface as `~N expression` entries.
+**Same-name value-list expression-edit detection** (`e74e811`, refined in `61190b1`) — `ValueListItem.Canonicalize` strips any trailing-letter suffix run (covers GH's L/D/F/M rewrites and combos thereof) and normalizes trailing-zero scale, so `5`, `5L`, `5.0`, `5.00`, `5.0d` all canonicalize to the same form. `ExpressionsEquivalent` then suppresses the diff when neither side parses as a clean number — GH normalizes opaque non-numeric text in unpredictable ways (observed in the wild: `2A² - 1` silently becoming `2² - 1` between sessions, likely from stripping unbound variable references), and pure text-to-text drift can't be reliably distinguished from real edits. Numeric edits (`5` → `10`) and edits crossing the numeric boundary (`5` → `"hello"`) still surface as `~N expression`.
+
+**Structured ghosts for MD slider + gradient** (`3d0dfe1`, `48ec6a8`, schema v6 from `04aa91f`):
+- **MD slider** — read via the typed `GH_MdSlider` handler (free-floating param path); ghost is sized to match the live component bounds exactly so the 2D dot lands where the live triangle would for the OLD (X, Y). Y axis is flipped at paint time to match GH's bottom-left-origin convention.
+- **Gradient** — `GH_GradientControl` is an `IGH_Component` (not a free-floating param), so the persistent capture is routed through `SerializeComponent` as well. `GH_Gradient` exposes stops via an indexed `Grip(int)` accessor paired with `GripCount`, and each `GH_Grip` stores its colour as `ColourLeft`/`ColourRight` (read either; prefer Left). Reflection walk is strictly read-only — properties and fields only, NEVER method invocation, after a brute-force method walk corrupted GH's drawing pipeline in an earlier iteration (see `feedback_no_reflection_method_invocation.md`).
+- **Gradient bar paint** — single `LinearGradientBrush` with `InterpolationColors` (ColorBlend) covers the whole bar, replacing the per-segment stitching that left sub-pixel seams as faint vertical white lines. `was: N stops` label sits below the rect in the dark brown-olive used by all other ghost labels.
 
 **Deferred Phase 3 items** (acknowledged limitations):
-- Structured ghosts for MD slider + gradient — currently fall through to opaque digest. Needs verifying GH SDK type names live before implementing; tracked for a future session.
 - Restoring downstream consumer wires when restoring a deleted component — visible via missing-wire arrows; the user manually rewires (the visualization is honest and predictable).
 - Restore-on-add (deleting a newly-added component) — not implemented; UX risk of accidentally trashing work.
 
-### Phase 4 — Underway (next concrete work)
+### Phase 4 — Next
 
-- **Team collaboration** — remotes, push/pull from the panel, basic conflict surfacing. The thesis-honest version: two designers iterating the same recipe across machines, where recipe-versioning starts paying real dividends over Revit's central-file model.
+Picked up next session. **Team collaboration** — remotes (add/list/remove), push/pull/fetch from the panel, credentials handling, upstream tracking, basic conflict surfacing. The thesis-honest version: two designers iterating the same recipe across machines, where recipe-versioning starts paying real dividends over Revit's central-file model.
+
+Open question to scope at the start of the session: where in the panel do remote ops live? A separate "Remote" header above History? Inline at the top of the branch dropdown? Worth a pass before writing code.
 
 ### Beyond Phase 4
 
@@ -225,11 +231,12 @@ See README's Roadmap section. Roughly: merge with on-canvas conflict UI (Phase 5
 
 ## Pointers to the user's persistent memory
 
-The user's memory under `C:\Users\samac\.claude\projects\D--Code-Projects-G-BIM\memory\` has narrower documents. This `CLAUDE.md` is the synthesis; the memory files are the receipts.
+The user's memory under `C:\Users\samac\.claude\projects\D--Code-Projects-G-Loom\memory\` has narrower documents. This `CLAUDE.md` is the synthesis; the memory files are the receipts.
 
 - `MEMORY.md` — index, one-line hooks
 - `user_platform.md` — user is on Windows; PowerShell default; canonical Grasshopper Libraries path
 - `feedback_panel_only_ux.md` — no ribbon components
+- `feedback_no_reflection_method_invocation.md` — properties + fields only when reflecting over GH SDK objects; method invocation broke the drawing pipeline once
 - `project_target_workflow.md` — AEC team primary, Product secondary, solo a subset of team
 - `project_recipe_versioning.md` — the thesis in detail with friction points
 - `project_branches_are_systems.md` — system-vocabulary rationale
