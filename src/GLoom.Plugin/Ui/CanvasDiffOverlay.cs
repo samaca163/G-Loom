@@ -853,8 +853,11 @@ public sealed class CanvasDiffOverlay
         }
         else if (oldKind == "mdslider")
         {
-            // Square box so the X/Y dot position reads correctly.
-            ghostHeight = Math.Max(40f, Math.Min(liveBounds.Width, 80f));
+            // Match the live component bounds so the ghost reads as
+            // "the OLD slider lived right here" and the X/Y dot lands
+            // at the same screen position the live triangle would
+            // occupy for those values.
+            ghostHeight = liveBounds.Height;
         }
         else
         {
@@ -1018,50 +1021,67 @@ public sealed class CanvasDiffOverlay
     {
         if (stops.Count == 0) return;
         var sorted = stops.OrderBy(s => s.Position).ToList();
-        var bar = new RectangleF(rect.X + 4f, rect.Y + 4f, rect.Width - 8f, rect.Height - 14f);
+        var bar = new RectangleF(rect.X + 4f, rect.Y + 4f, rect.Width - 8f, rect.Height - 8f);
         if (bar.Width <= 1f || bar.Height <= 1f) return;
 
-        // Solid fill before the first stop + after the last stop with
-        // the boundary colors so the visualisation reads continuously
-        // even when stops don't span the full 0..1 range.
-        var firstColor = TryParseArgb(sorted[0].ColorArgb) ?? Color.Gray;
-        var lastColor = TryParseArgb(sorted[^1].ColorArgb) ?? Color.Gray;
-        using (var firstFill = new SolidBrush(firstColor))
-            g.FillRectangle(firstFill, bar.X, bar.Y, (float)sorted[0].Position * bar.Width, bar.Height);
-        using (var lastFill = new SolidBrush(lastColor))
+        // One LinearGradientBrush with InterpolationColors covers the
+        // whole bar — eliminates the sub-pixel seams that appeared
+        // when stitching multiple per-segment brushes together.
+        // ColorBlend requires positions sorted in 0..1 with both
+        // endpoints present, so pad the boundary colors when the
+        // actual stops don't span the full range.
+        var colors = new List<Color>();
+        var positions = new List<float>();
+        var first = TryParseArgb(sorted[0].ColorArgb) ?? Color.Gray;
+        var last = TryParseArgb(sorted[^1].ColorArgb) ?? Color.Gray;
+        if (sorted[0].Position > 0d)
         {
-            var lastStart = bar.X + (float)sorted[^1].Position * bar.Width;
-            g.FillRectangle(lastFill, lastStart, bar.Y, bar.Right - lastStart, bar.Height);
+            colors.Add(first);
+            positions.Add(0f);
         }
-
-        for (var i = 0; i < sorted.Count - 1; i++)
+        foreach (var s in sorted)
         {
-            var a = sorted[i];
-            var b = sorted[i + 1];
-            var aColor = TryParseArgb(a.ColorArgb) ?? Color.Gray;
-            var bColor = TryParseArgb(b.ColorArgb) ?? Color.Gray;
-            var x1 = bar.X + Math.Clamp((float)a.Position, 0f, 1f) * bar.Width;
-            var x2 = bar.X + Math.Clamp((float)b.Position, 0f, 1f) * bar.Width;
-            if (x2 <= x1) continue;
+            colors.Add(TryParseArgb(s.ColorArgb) ?? Color.Gray);
+            positions.Add((float)Math.Clamp(s.Position, 0d, 1d));
+        }
+        if (sorted[^1].Position < 1d)
+        {
+            colors.Add(last);
+            positions.Add(1f);
+        }
+        // ColorBlend rejects duplicate positions; nudge any collision
+        // by a hair so a stop right at 0 or 1 paired with our padding
+        // doesn't throw.
+        for (int i = 1; i < positions.Count; i++)
+            if (positions[i] <= positions[i - 1])
+                positions[i] = Math.Min(1f, positions[i - 1] + 1e-4f);
 
-            using var lgb = new LinearGradientBrush(
-                new PointF(x1, bar.Y),
-                new PointF(x2 + 0.001f, bar.Y),
-                aColor, bColor);
-            g.FillRectangle(lgb, new RectangleF(x1, bar.Y, x2 - x1, bar.Height));
+        using (var lgb = new LinearGradientBrush(
+            new PointF(bar.X, bar.Y),
+            new PointF(bar.Right, bar.Y),
+            colors[0], colors[^1]))
+        {
+            lgb.InterpolationColors = new System.Drawing.Drawing2D.ColorBlend(colors.Count)
+            {
+                Colors = colors.ToArray(),
+                Positions = positions.ToArray(),
+            };
+            g.FillRectangle(lgb, bar);
         }
 
         using var outline = new Pen(outlineColor, 1.5f);
         g.DrawRectangle(outline, bar.X, bar.Y, bar.Width, bar.Height);
 
-        // Stop count label below.
+        // Stop-count label sits BELOW the bar, dark brown-olive so it
+        // reads against the canvas grid the same way the MD slider
+        // and color-swatch labels do.
         using var font = new Font("Segoe UI", 8f);
-        using var textBrush = new SolidBrush(Color.FromArgb(220, outlineColor.R, outlineColor.G, outlineColor.B));
+        using var textBrush = new SolidBrush(Color.FromArgb(230, 110, 80, 0));
         var label = $"was: {sorted.Count} stop{(sorted.Count == 1 ? "" : "s")}";
         var size = g.MeasureString(label, font);
         g.DrawString(label, font, textBrush,
             rect.X + Math.Max(4f, (rect.Width - size.Width) / 2f),
-            rect.Bottom - size.Height - 2f);
+            rect.Bottom + 2f);
     }
 
     /// <summary>
@@ -1082,13 +1102,18 @@ public sealed class CanvasDiffOverlay
 
         var nx = (float)Math.Clamp(md.X, 0d, 1d);
         var ny = (float)Math.Clamp(md.Y, 0d, 1d);
-        var dot = new PointF(box.X + nx * box.Width, box.Y + ny * box.Height);
+        // GH's MD slider uses (0,0) bottom-left, (1,1) top-right; screen
+        // Y is top-down, so flip ny when projecting onto the box.
+        var dot = new PointF(box.X + nx * box.Width, box.Y + (1f - ny) * box.Height);
         using var knobBrush = new SolidBrush(knobColor);
         const float r = 5f;
         g.FillEllipse(knobBrush, dot.X - r, dot.Y - r, r * 2f, r * 2f);
 
         using var font = new Font("Segoe UI", 7.5f);
-        using var textBrush = new SolidBrush(Color.FromArgb(220, outlineColor.R, outlineColor.G, outlineColor.B));
+        // Match the dark brown-olive used for color-swatch labels — the
+        // light-yellow outline color is too pale to read against the
+        // ghost fill and the canvas grid.
+        using var textBrush = new SolidBrush(Color.FromArgb(230, 110, 80, 0));
         var label = $"was: ({md.X:0.##}, {md.Y:0.##})";
         var size = g.MeasureString(label, font);
         g.DrawString(label, font, textBrush,
