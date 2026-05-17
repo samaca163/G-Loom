@@ -256,12 +256,13 @@ public sealed record DocumentDiff(
 
             var added = newByName.Keys.Except(oldByName.Keys, StringComparer.Ordinal).Count();
             var removed = oldByName.Keys.Except(newByName.Keys, StringComparer.Ordinal).Count();
-            var changed = oldByName.Count(kv =>
-                newByName.TryGetValue(kv.Key, out var n)
-                && !string.Equals(
-                    ValueListItem.Canonicalize(n.Expression),
-                    ValueListItem.Canonicalize(kv.Value.Expression),
-                    StringComparison.Ordinal));
+            var changed = 0;
+            foreach (var kv in oldByName)
+            {
+                if (!newByName.TryGetValue(kv.Key, out var n)) continue;
+                if (ValueListItem.ExpressionsEquivalent(kv.Value.Expression, n.Expression)) continue;
+                changed++;
+            }
 
             if (added > 0) parts.Add($"+{added} item{Plural(added)}");
             if (removed > 0) parts.Add($"-{removed} item{Plural(removed)}");
