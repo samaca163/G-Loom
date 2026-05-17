@@ -177,10 +177,7 @@ public sealed record PersistentData(
         for (var i = 0; i < a.Count; i++)
         {
             if (!string.Equals(a[i].Name, b[i].Name, System.StringComparison.Ordinal)) return false;
-            if (!string.Equals(
-                ValueListItem.Canonicalize(a[i].Expression),
-                ValueListItem.Canonicalize(b[i].Expression),
-                System.StringComparison.Ordinal)) return false;
+            if (!ValueListItem.ExpressionsEquivalent(a[i].Expression, b[i].Expression)) return false;
         }
         return true;
     }
@@ -205,24 +202,57 @@ public sealed record ValueListItem(string Name, string Expression)
         if (string.IsNullOrEmpty(expression)) return string.Empty;
         var trimmed = expression.Trim();
 
-        var withoutSuffix = trimmed.Length > 1 && IsNumericSuffix(trimmed[trimmed.Length - 1])
-            ? trimmed.Substring(0, trimmed.Length - 1)
-            : trimmed;
-
-        if (decimal.TryParse(
-            withoutSuffix,
-            System.Globalization.NumberStyles.Float,
-            System.Globalization.CultureInfo.InvariantCulture,
-            out var d))
+        // Try parsing the raw string first so scientific notation
+        // ("1e10") survives — the exponent's 'e' would otherwise be
+        // stripped as a trailing-letter suffix below. If that fails,
+        // strip any trailing run of letters (covers GH's numeric
+        // literal suffixes — L, d, F, M, combos thereof) and retry.
+        if (!TryParseDecimal(trimmed, out var d))
         {
-            return d.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            int end = trimmed.Length;
+            while (end > 0 && char.IsLetter(trimmed[end - 1])) end--;
+            if (end == trimmed.Length || !TryParseDecimal(trimmed.AsSpan(0, end).ToString(), out d))
+                return trimmed;
         }
 
-        return trimmed;
+        // Normalize trailing zeros so "5", "5.0", and "5.00" all
+        // canonicalize to "5" — GH sometimes rewrites scale between
+        // sessions too, not just suffix.
+        var s = d.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (s.Contains('.'))
+        {
+            s = s.TrimEnd('0');
+            if (s.EndsWith(".")) s = s.Substring(0, s.Length - 1);
+        }
+        return s;
     }
 
-    private static bool IsNumericSuffix(char c) =>
-        c is 'L' or 'l' or 'D' or 'd' or 'F' or 'f' or 'M' or 'm';
+    private static bool TryParseDecimal(string s, out decimal d) =>
+        decimal.TryParse(s,
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out d);
+
+    /// <summary>
+    /// True when two value-list expressions should be treated as the
+    /// same for diff purposes. Numeric forms are compared via
+    /// canonicalization (handles GH's suffix + scale rewrites). When
+    /// NEITHER side parses as a number, the expression is opaque text
+    /// that GH may normalize unpredictably (e.g. stripping unbound
+    /// variable references), so we suppress the diff to avoid false
+    /// positives. Numeric edits AND edits that cross the numeric
+    /// boundary still surface — only pure text-vs-text drift is
+    /// silenced.
+    /// </summary>
+    public static bool ExpressionsEquivalent(string fromExpr, string toExpr)
+    {
+        var fromC = Canonicalize(fromExpr);
+        var toC = Canonicalize(toExpr);
+        if (string.Equals(fromC, toC, System.StringComparison.Ordinal)) return true;
+        return !IsCleanNumeric(fromC) && !IsCleanNumeric(toC);
+    }
+
+    private static bool IsCleanNumeric(string s) => TryParseDecimal(s, out _);
 }
 
 public sealed record SliderValue(
