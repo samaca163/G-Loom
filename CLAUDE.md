@@ -141,9 +141,9 @@ The user is a designer / architect, not a software engineer. They think workflow
 For exploratory questions, respond in 2–3 sentences with a recommendation and the main tradeoff. Save longer analysis for when they explicitly ask to discuss a topic in depth (then go deep).
 
 ### Platform
-The user is on **Windows** (was on macOS earlier in the project's life — see `memory/user_platform.md`). PowerShell deploy script is what they use day-to-day. The macOS deploy script is maintained but the user can't easily test it; if you change deploy logic, change both scripts in lockstep.
+The user runs a **two-machine workflow**: develops on **macOS** (`/Users/isamaca/Tech Projects/G-Loom/`, `dotnet` at `$HOME/.dotnet/dotnet`, zsh) and tests in Rhino on **Windows** (PowerShell, `dotnet` at `C:\Program Files\dotnet\`, `git` at `C:\Program Files\Git\cmd\git.exe`). The `.gha` is cross-platform compiled, but Phase smoke-testing always happens on Windows where their production Rhino lives — so a session that ends with "let's smoke test next time" usually means the next session's first job is **deploying the .gha on Windows** via `build/deploy-local.ps1`. See `memory/user_platform.md` for paths and tooling on both sides.
 
-Tools available on the machine: `dotnet` 8.0.200 at `C:\Program Files\dotnet\`, `git` at `C:\Program Files\Git\cmd\git.exe`. PowerShell is the default shell.
+Lockstep both deploy scripts when you change deploy logic — the user may test one side at a time but expects both to stay in sync.
 
 ### Workflow expectations
 - **Build before committing.** `dotnet build src/GLoom.Plugin/GLoom.Plugin.csproj -c Release` should succeed cleanly. Zero warnings, zero errors.
@@ -219,11 +219,44 @@ All optional fields with `= null` defaults; older documents parse cleanly and ol
 - Restoring downstream consumer wires when restoring a deleted component — visible via missing-wire arrows; the user manually rewires (the visualization is honest and predictable).
 - Restore-on-add (deleting a newly-added component) — not implemented; UX risk of accidentally trashing work.
 
-### Phase 4 — Next
+### Phase 4 — First pass landed (built clean, awaiting smoke test on Windows)
 
-Picked up next session. **Team collaboration** — remotes (add/list/remove), push/pull/fetch from the panel, credentials handling, upstream tracking, basic conflict surfacing. The thesis-honest version: two designers iterating the same recipe across machines, where recipe-versioning starts paying real dividends over Revit's central-file model.
+**Team collaboration: remotes, push/pull/fetch, upstream tracking, smart Sync.** Implementation merged locally and the macOS-side `.gha` is in `~/Library/.../Libraries/G-Loom/`. **Not yet deployed on Windows and not yet smoke-tested.**
 
-Open question to scope at the start of the session: where in the panel do remote ops live? A separate "Remote" header above History? Inline at the top of the branch dropdown? Worth a pass before writing code.
+**Next session: start with the Windows smoke test.**
+
+1. **Deploy on Windows first** — close Rhino, run `build/deploy-local.ps1`. The macOS deploy is already done from the previous session but the user's real Rhino is on Windows; that's where actual exercise happens.
+2. Open a tracked `.gh` → confirm two new rows appear in the panel after `Branch:`:
+   - `Remote:` button showing `(no remote) ▼`
+   - `Sync:` row showing `(no remote configured)` with a disabled Sync button
+3. Click `Remote ▼` → `Add remote...` → name `origin`, paste a real URL.
+4. Remote button should now read `origin (no upstream) ▼`; Sync button label should switch to **Push**.
+5. Click **Push** — first push auto-sets upstream via `-u`. After it succeeds the Remote button should show `origin/<branch>` and the Sync row should read `✓ up to date`.
+6. Commit something locally → Sync flips to `↑1` / **Push**. Push it. Verify it appears on the remote.
+7. From another clone (or by editing on the remote and pushing), get the local copy behind. Sync should show `↓N` / **Pull** and pulling should swap the canvases.
+
+**What was built (high-level):**
+
+- **Repository layer** (`Vcs/GLoomRepository.cs`):
+  - Remote CRUD: `GetRemotes`, `AddRemote`, `RemoveRemote`, `SetRemoteUrl`
+  - Upstream: `GetUpstream`, `SetUpstream`
+  - Ahead/behind: `GetAheadBehind` via `rev-list --left-right --count` (local-only, no network)
+  - Network: `Fetch`, `Pull` (ff-only), `Push` (with `-u` toggle) — each returns a `NetworkResult(success, message)` rather than throwing, so the panel can render failure text
+  - New `RunNetwork` helper sets `GIT_TERMINAL_PROMPT=0` so credential prompts fail fast instead of hanging Rhino on a TTY-less stdin
+
+- **Panel** (`Ui/GLoomPanel.cs`):
+  - Two new rows in the metadata block right after Branch: `Remote:` (button-as-dropdown) and `Sync:` (status label + action button)
+  - Remote dropdown morphs with state: "Add remote..." when empty; otherwise URL info rows, "Set upstream..."/"Change upstream..." (one-click when single remote), "Change URL...", "Add another...", "Remove..."
+  - Sync button label switches between **Sync / Push / Pull** based on `(ahead, behind)`; counts render as `↓N ↑N`
+  - Smart Sync runs fetch → ff-only pull (if behind) → push (if ahead); first push auto-sets upstream; non-ff pull surfaces an explicit "real merges land in a future phase" hint
+  - After a successful pull, `DocumentTracker.ReloadAllInRepo` is called so open canvases reflect the new working tree without a manual close/reopen
+
+**Known limits left out of Phase 4 by design (confirmed with user):**
+
+- **Network ops are synchronous on the UI thread** — Rhino will hang briefly during fetch/push on slow networks. Async + cancel UI is a polish item for later.
+- **Pull is fast-forward-only.** Diverged branches surface a clear rejection message; real merges with on-canvas conflict UI land in **Phase 5**.
+- **Credentials are entirely delegated to git's helpers** (Windows Credential Manager, macOS Keychain, SSH agent). No custom credential UI.
+- **Single-remote scope.** Multiple remotes still work mechanically (the menu handles N), but UX is optimized for the one-remote case the user said is dominant.
 
 ### Beyond Phase 4
 
