@@ -54,6 +54,9 @@ public sealed class GLoomPanel : Panel
     private readonly Label _filePathLabel = NewValueLabel();
     private readonly Label _repoLabel = NewValueLabel();
     private readonly Button _branchButton = new() { Text = "-" };
+    private readonly Button _remoteButton = new() { Text = "-" };
+    private readonly Label _syncStatusLabel = NewValueLabel();
+    private readonly Button _syncButton = new() { Text = "Sync" };
     private readonly Label _currentVersionLabel = NewValueLabel();
     private readonly Label _lastCommitLabel = NewValueLabel();
     private readonly Label _nextVersionLabel = NewValueLabel();
@@ -69,6 +72,7 @@ public sealed class GLoomPanel : Panel
     private readonly Label _overlayRefLabel = new() { Text = "Overlay ref: HEAD" };
     private readonly Button _overlayRefResetBtn = new() { Text = "Reset", Visible = false };
     private ContextMenu? _branchMenu;
+    private ContextMenu? _remoteMenu;
 
     // History list
     private readonly Label _historyHeaderLabel = new() { Text = "History" };
@@ -95,6 +99,8 @@ public sealed class GLoomPanel : Panel
             Refresh();
         };
         _branchButton.Click += (_, _) => _branchMenu?.Show(_branchButton);
+        _remoteButton.Click += (_, _) => _remoteMenu?.Show(_remoteButton);
+        _syncButton.Click += (_, _) => OnSyncClicked();
 
         // Two-way binding with the overlay singleton: clicking the box
         // toggles the overlay; the overlay raising EnabledChanged
@@ -171,6 +177,8 @@ public sealed class GLoomPanel : Panel
                 LabelRow("File:",            _filePathLabel),
                 LabelRow("Repository:",      _repoLabel),
                 LabelRow("Branch:",          _branchButton),
+                LabelRow("Remote:",          _remoteButton),
+                LabelRow("Sync:",            BuildSyncRow()),
                 LabelRow("Current version:", _currentVersionLabel),
                 LabelRow("Last commit:",     _lastCommitLabel),
                 LabelRow("Next version:",    _nextVersionLabel),
@@ -211,6 +219,21 @@ public sealed class GLoomPanel : Panel
     // ---- helpers ------------------------------------------------------
 
     private static Label NewValueLabel() => new() { Text = "-", Wrap = WrapMode.Word };
+
+    private StackLayout BuildSyncRow()
+    {
+        return new StackLayout
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            VerticalContentAlignment = Eto.Forms.VerticalAlignment.Center,
+            Items =
+            {
+                new StackLayoutItem(_syncStatusLabel, expand: true),
+                new StackLayoutItem(_syncButton),
+            },
+        };
+    }
 
     private TableLayout BuildOverlayFilters()
     {
@@ -314,6 +337,12 @@ public sealed class GLoomPanel : Panel
             var status = GLoomRepository.GetStatus(s.RepoPath, fileScope);
             var branches = GLoomRepository.GetBranches(s.RepoPath);
             UpdateBranchControl(s, branches, status.Branch);
+
+            var remotes = GLoomRepository.GetRemotes(s.RepoPath);
+            var upstream = GLoomRepository.GetUpstream(s.RepoPath, status.Branch);
+            var ab = GLoomRepository.GetAheadBehind(s.RepoPath, status.Branch);
+            UpdateRemoteControl(s, remotes, upstream, branches, status.Branch);
+            UpdateSyncControl(remotes, upstream, ab, status.Branch);
             _lastCommitLabel.Text = status.LastCommit is null
                 ? "(no commits yet)"
                 : $"{status.LastCommit.Sha[..7]}  {status.LastCommit.Message}";
@@ -336,6 +365,7 @@ public sealed class GLoomPanel : Panel
         {
             _commitButton.Enabled = false;
             DisableBranchControl();
+            DisableRemoteControls();
             _lastCommitLabel.Text = $"(error: {ex.Message})";
             _historyContainer.Items.Clear();
             _showMoreButton.Visible = false;
@@ -473,6 +503,7 @@ public sealed class GLoomPanel : Panel
         _filePathLabel.Text = fileLabel;
         _repoLabel.Text = "-";
         DisableBranchControl();
+        DisableRemoteControls();
         _currentVersionLabel.Text = "-";
         _lastCommitLabel.Text = "-";
         _nextVersionLabel.Text = "-";
@@ -488,6 +519,7 @@ public sealed class GLoomPanel : Panel
         _filePathLabel.Text = filePath;
         _repoLabel.Text = "(not in a Git repo - run `git init` in the folder)";
         DisableBranchControl();
+        DisableRemoteControls();
         _currentVersionLabel.Text = "-";
         _lastCommitLabel.Text = "-";
         _nextVersionLabel.Text = "-";
@@ -503,6 +535,191 @@ public sealed class GLoomPanel : Panel
         _branchButton.Text = "-";
         _branchButton.Enabled = false;
         _branchMenu = null;
+    }
+
+    private void DisableRemoteControls()
+    {
+        _remoteButton.Text = "-";
+        _remoteButton.Enabled = false;
+        _remoteMenu = null;
+        _syncStatusLabel.Text = "-";
+        _syncButton.Text = "Sync";
+        _syncButton.Enabled = false;
+    }
+
+    /// <summary>
+    /// Renders the Remote button: shows the upstream when one is configured
+    /// (origin/main), or the remote name with a "no upstream" hint, or a
+    /// "(no remote)" placeholder. Menu adapts to whichever state we're in -
+    /// Add when nothing's configured, Set upstream / Change URL / Remove
+    /// when at least one remote exists.
+    /// </summary>
+    private void UpdateRemoteControl(
+        TrackedState s,
+        IReadOnlyList<GLoomRepository.RemoteInfo> remotes,
+        GLoomRepository.UpstreamInfo? upstream,
+        IReadOnlyList<GLoomRepository.BranchInfo> branches,
+        string currentBranch)
+    {
+        var menu = new ContextMenu();
+
+        if (remotes.Count == 0)
+        {
+            _remoteButton.Text = "(no remote)  ▼";
+            _remoteButton.Enabled = true;
+
+            var addItem = new ButtonMenuItem { Text = "Add remote..." };
+            addItem.Click += (_, _) => OnAddRemoteClicked(s);
+            menu.Items.Add(addItem);
+        }
+        else
+        {
+            if (upstream is { } u)
+                _remoteButton.Text = $"▶ {u.Remote}/{u.RemoteBranch}  ▼";
+            else
+                _remoteButton.Text = $"{remotes[0].Name} (no upstream)  ▼";
+            _remoteButton.Enabled = true;
+
+            var canSetUpstream = branches.Count > 0
+                && !string.IsNullOrEmpty(currentBranch)
+                && currentBranch != "(detached)";
+
+            // URL info row(s) - non-actionable, lets the user see what's configured.
+            foreach (var r in remotes)
+            {
+                var info = new ButtonMenuItem { Text = $"{r.Name}: {r.FetchUrl}", Enabled = false };
+                menu.Items.Add(info);
+            }
+            menu.Items.Add(new SeparatorMenuItem());
+
+            // Set upstream - one-click for single-remote, sub-menu for many.
+            if (remotes.Count == 1 && canSetUpstream)
+            {
+                var only = remotes[0];
+                var label = upstream is null
+                    ? $"Set upstream to {only.Name}/{currentBranch}"
+                    : $"Change upstream to {only.Name}/{currentBranch}";
+                var setItem = new ButtonMenuItem { Text = label };
+                setItem.Click += (_, _) => OnSetUpstreamClicked(s, currentBranch, only.Name, currentBranch);
+                menu.Items.Add(setItem);
+            }
+            else
+            {
+                var setRoot = new ButtonMenuItem { Text = "Set upstream...", Enabled = canSetUpstream };
+                foreach (var r in remotes)
+                {
+                    var remoteName = r.Name;
+                    var sub = new ButtonMenuItem { Text = $"{remoteName}/{currentBranch}" };
+                    sub.Click += (_, _) => OnSetUpstreamClicked(s, currentBranch, remoteName, currentBranch);
+                    setRoot.Items.Add(sub);
+                }
+                menu.Items.Add(setRoot);
+            }
+
+            // Change URL - single remote: one click, many: sub-menu.
+            if (remotes.Count == 1)
+            {
+                var only = remotes[0];
+                var changeItem = new ButtonMenuItem { Text = "Change URL..." };
+                changeItem.Click += (_, _) => OnChangeRemoteUrlClicked(s, only.Name, only.FetchUrl);
+                menu.Items.Add(changeItem);
+            }
+            else
+            {
+                var changeRoot = new ButtonMenuItem { Text = "Change URL..." };
+                foreach (var r in remotes)
+                {
+                    var rn = r.Name;
+                    var ru = r.FetchUrl;
+                    var sub = new ButtonMenuItem { Text = rn };
+                    sub.Click += (_, _) => OnChangeRemoteUrlClicked(s, rn, ru);
+                    changeRoot.Items.Add(sub);
+                }
+                menu.Items.Add(changeRoot);
+            }
+
+            menu.Items.Add(new SeparatorMenuItem());
+
+            var addItem = new ButtonMenuItem { Text = "Add remote..." };
+            addItem.Click += (_, _) => OnAddRemoteClicked(s);
+            menu.Items.Add(addItem);
+
+            if (remotes.Count == 1)
+            {
+                var only = remotes[0];
+                var rem = new ButtonMenuItem { Text = $"Remove '{only.Name}'" };
+                rem.Click += (_, _) => OnRemoveRemoteClicked(s, only.Name);
+                menu.Items.Add(rem);
+            }
+            else
+            {
+                var removeRoot = new ButtonMenuItem { Text = "Remove remote..." };
+                foreach (var r in remotes)
+                {
+                    var rn = r.Name;
+                    var sub = new ButtonMenuItem { Text = rn };
+                    sub.Click += (_, _) => OnRemoveRemoteClicked(s, rn);
+                    removeRoot.Items.Add(sub);
+                }
+                menu.Items.Add(removeRoot);
+            }
+        }
+
+        _remoteMenu = menu;
+    }
+
+    private void UpdateSyncControl(
+        IReadOnlyList<GLoomRepository.RemoteInfo> remotes,
+        GLoomRepository.UpstreamInfo? upstream,
+        GLoomRepository.AheadBehind ab,
+        string currentBranch)
+    {
+        if (remotes.Count == 0)
+        {
+            _syncStatusLabel.Text = "(no remote configured)";
+            _syncButton.Text = "Sync";
+            _syncButton.Enabled = false;
+            return;
+        }
+
+        if (currentBranch == "(detached)")
+        {
+            _syncStatusLabel.Text = "(detached HEAD)";
+            _syncButton.Text = "Sync";
+            _syncButton.Enabled = false;
+            return;
+        }
+
+        if (upstream is null)
+        {
+            _syncStatusLabel.Text = "(no upstream)";
+            _syncButton.Text = "Push";
+            _syncButton.Enabled = true;
+            return;
+        }
+
+        if (ab.Ahead == 0 && ab.Behind == 0)
+        {
+            _syncStatusLabel.Text = "✓ up to date";
+            _syncButton.Text = "Sync";
+        }
+        else if (ab.Ahead > 0 && ab.Behind == 0)
+        {
+            _syncStatusLabel.Text = $"↑{ab.Ahead}";
+            _syncButton.Text = "Push";
+        }
+        else if (ab.Ahead == 0 && ab.Behind > 0)
+        {
+            _syncStatusLabel.Text = $"↓{ab.Behind}";
+            _syncButton.Text = "Pull";
+        }
+        else
+        {
+            _syncStatusLabel.Text = $"↓{ab.Behind}  ↑{ab.Ahead}";
+            _syncButton.Text = "Sync";
+        }
+
+        _syncButton.Enabled = true;
     }
 
     /// <summary>
@@ -713,6 +930,236 @@ public sealed class GLoomPanel : Panel
                     "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
             }
         }
+    }
+
+    // ---- remote handlers ---------------------------------------------
+
+    private void OnAddRemoteClicked(TrackedState s)
+    {
+        if (s.RepoPath is null) return;
+
+        var name = string.Empty;
+        var ok = Rhino.UI.Dialogs.ShowEditBox(
+            "G-Loom: Add remote", "Remote name:", "origin", false, out name);
+        if (!ok || string.IsNullOrWhiteSpace(name)) return;
+        var trimmedName = name.Trim();
+
+        var url = string.Empty;
+        ok = Rhino.UI.Dialogs.ShowEditBox(
+            "G-Loom: Add remote", $"URL for '{trimmedName}':", string.Empty, false, out url);
+        if (!ok || string.IsNullOrWhiteSpace(url)) return;
+        var trimmedUrl = url.Trim();
+
+        try
+        {
+            GLoomRepository.AddRemote(s.RepoPath, trimmedName, trimmedUrl);
+            RhinoApp.WriteLine($"[G-Loom] Added remote '{trimmedName}' -> {trimmedUrl}");
+            DocumentTracker.Instance.Refresh();
+            Refresh();
+        }
+        catch (Exception ex)
+        {
+            RhinoApp.WriteLine($"[G-Loom] Add remote failed: {ex.Message}");
+            MessageBox.Show($"Add remote failed:\n\n{ex.Message}",
+                "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
+        }
+    }
+
+    private void OnRemoveRemoteClicked(TrackedState s, string remoteName)
+    {
+        if (s.RepoPath is null) return;
+
+        var prompt = $"Remove remote '{remoteName}'?\n\n" +
+                     "This only removes the local mapping. The remote repo itself is untouched.";
+        var result = MessageBox.Show(prompt, "G-Loom: Remove remote",
+            MessageBoxButtons.OKCancel, MessageBoxType.Warning);
+        if (result != DialogResult.Ok) return;
+
+        try
+        {
+            GLoomRepository.RemoveRemote(s.RepoPath, remoteName);
+            RhinoApp.WriteLine($"[G-Loom] Removed remote '{remoteName}'.");
+            DocumentTracker.Instance.Refresh();
+            Refresh();
+        }
+        catch (Exception ex)
+        {
+            RhinoApp.WriteLine($"[G-Loom] Remove remote failed: {ex.Message}");
+            MessageBox.Show($"Remove remote failed:\n\n{ex.Message}",
+                "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
+        }
+    }
+
+    private void OnChangeRemoteUrlClicked(TrackedState s, string remoteName, string currentUrl)
+    {
+        if (s.RepoPath is null) return;
+
+        var url = string.Empty;
+        var ok = Rhino.UI.Dialogs.ShowEditBox(
+            "G-Loom: Change remote URL",
+            $"New URL for '{remoteName}':", currentUrl, false, out url);
+        if (!ok || string.IsNullOrWhiteSpace(url)) return;
+        var trimmed = url.Trim();
+        if (trimmed == currentUrl) return;
+
+        try
+        {
+            GLoomRepository.SetRemoteUrl(s.RepoPath, remoteName, trimmed);
+            RhinoApp.WriteLine($"[G-Loom] Changed '{remoteName}' URL -> {trimmed}");
+            DocumentTracker.Instance.Refresh();
+            Refresh();
+        }
+        catch (Exception ex)
+        {
+            RhinoApp.WriteLine($"[G-Loom] Change URL failed: {ex.Message}");
+            MessageBox.Show($"Change URL failed:\n\n{ex.Message}",
+                "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
+        }
+    }
+
+    private void OnSetUpstreamClicked(TrackedState s, string branch, string remoteName, string remoteBranch)
+    {
+        if (s.RepoPath is null) return;
+
+        try
+        {
+            GLoomRepository.SetUpstream(s.RepoPath, branch, remoteName, remoteBranch);
+            RhinoApp.WriteLine($"[G-Loom] Upstream for '{branch}' -> {remoteName}/{remoteBranch}");
+            DocumentTracker.Instance.Refresh();
+            Refresh();
+        }
+        catch (Exception ex)
+        {
+            // git fails with a clear "the requested upstream branch ... does not
+            // exist" when the remote branch hasn't been pushed yet; surface that
+            // alongside a hint about pushing first.
+            RhinoApp.WriteLine($"[G-Loom] Set upstream failed: {ex.Message}");
+            MessageBox.Show(
+                $"Set upstream failed:\n\n{ex.Message}\n\n" +
+                $"If the branch hasn't been pushed yet, use Push (which auto-sets upstream).",
+                "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
+        }
+    }
+
+    // ---- sync handler ------------------------------------------------
+
+    /// <summary>
+    /// One-button Smart Sync: fetch first to refresh ahead/behind, then if
+    /// behind pull --ff-only, then if ahead push. The button label hints at
+    /// which leg will actually run (Sync / Push / Pull) based on the last
+    /// observed state, but the action always does the full sequence so users
+    /// who haven't refreshed lately still get the right outcome.
+    /// </summary>
+    private void OnSyncClicked()
+    {
+        var s = DocumentTracker.Instance.State;
+        if (s.RepoPath is null) return;
+
+        try
+        {
+            var status = GLoomRepository.GetStatus(s.RepoPath);
+            var branch = status.Branch;
+            if (string.IsNullOrEmpty(branch) || branch == "(detached)")
+            {
+                MessageBox.Show("Cannot sync from a detached HEAD.",
+                    "G-Loom", MessageBoxButtons.OK, MessageBoxType.Warning);
+                return;
+            }
+
+            var remotes = GLoomRepository.GetRemotes(s.RepoPath);
+            if (remotes.Count == 0)
+            {
+                MessageBox.Show("No remote configured. Use the Remote dropdown to add one.",
+                    "G-Loom", MessageBoxButtons.OK, MessageBoxType.Warning);
+                return;
+            }
+
+            var upstream = GLoomRepository.GetUpstream(s.RepoPath, branch);
+            var remoteName = upstream?.Remote ?? remotes[0].Name;
+            var remoteBranch = upstream?.RemoteBranch ?? branch;
+
+            _syncButton.Enabled = false;
+            _syncStatusLabel.Text = $"Fetching {remoteName}...";
+
+            var fetch = GLoomRepository.Fetch(s.RepoPath, remoteName);
+            if (!fetch.Success)
+            {
+                ReportSyncFailure("Fetch", fetch.Message);
+                return;
+            }
+            RhinoApp.WriteLine($"[G-Loom] Fetched {remoteName}.");
+
+            // No upstream yet: this is a fresh branch; push with -u and we're done.
+            if (upstream is null)
+            {
+                _syncStatusLabel.Text = $"Pushing to {remoteName}/{branch}...";
+                var firstPush = GLoomRepository.Push(s.RepoPath, remoteName, branch, setUpstream: true);
+                if (!firstPush.Success)
+                {
+                    ReportSyncFailure("Push", firstPush.Message);
+                    return;
+                }
+                RhinoApp.WriteLine($"[G-Loom] Pushed {branch} -> {remoteName} (upstream set).");
+                FinishSync();
+                return;
+            }
+
+            // Recompute ahead/behind after the fetch.
+            var ab = GLoomRepository.GetAheadBehind(s.RepoPath, branch);
+
+            if (ab.Behind > 0)
+            {
+                _syncStatusLabel.Text = $"Pulling from {remoteName}/{remoteBranch}...";
+                var pull = GLoomRepository.Pull(s.RepoPath, remoteName, remoteBranch);
+                if (!pull.Success)
+                {
+                    ReportSyncFailure("Pull", pull.Message +
+                        "\n\nTip: G-Loom only supports fast-forward pulls today. If the branches " +
+                        "have diverged, real merges will land in a future phase.");
+                    return;
+                }
+                RhinoApp.WriteLine($"[G-Loom] Pulled from {remoteName}/{remoteBranch}.");
+
+                // The pull may have changed the working tree - reload every
+                // affected .gh so open canvases reflect the new state.
+                DocumentTracker.Instance.ReloadAllInRepo(s.RepoPath);
+
+                // Recompute ahead/behind after the pull.
+                ab = GLoomRepository.GetAheadBehind(s.RepoPath, branch);
+            }
+
+            if (ab.Ahead > 0)
+            {
+                _syncStatusLabel.Text = $"Pushing to {remoteName}/{remoteBranch}...";
+                var push = GLoomRepository.Push(s.RepoPath, remoteName, remoteBranch, setUpstream: false);
+                if (!push.Success)
+                {
+                    ReportSyncFailure("Push", push.Message);
+                    return;
+                }
+                RhinoApp.WriteLine($"[G-Loom] Pushed to {remoteName}/{remoteBranch}.");
+            }
+
+            FinishSync();
+        }
+        catch (Exception ex)
+        {
+            RhinoApp.WriteLine($"[G-Loom] Sync failed: {ex.Message}");
+            ReportSyncFailure("Sync", ex.Message);
+        }
+    }
+
+    private void FinishSync()
+    {
+        DocumentTracker.Instance.Refresh();
+        Refresh();
+    }
+
+    private void ReportSyncFailure(string stage, string message)
+    {
+        MessageBox.Show($"{stage} failed:\n\n{message}",
+            "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
+        Refresh();
     }
 
     // ---- tag handlers ------------------------------------------------
