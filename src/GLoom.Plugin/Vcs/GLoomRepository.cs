@@ -20,6 +20,10 @@ public static class GLoomRepository
     public sealed record BranchInfo(string Name, bool IsCurrent);
     public sealed record ForkPoint(string ParentBranch, string ForkSha);
     public sealed record TagInfo(string Name, string Sha, string? Message);
+    public sealed record RemoteInfo(string Name, string FetchUrl);
+    public sealed record UpstreamInfo(string Remote, string RemoteBranch);
+    public sealed record NetworkResult(bool Success, string Message);
+    public readonly record struct AheadBehind(int Ahead, int Behind);
 
     // ASCII control codes - extremely unlikely to appear in commit messages or
     // author fields - used as field/record delimiters in `git log` output so we
@@ -432,6 +436,192 @@ public static class GLoomRepository
                 $"git tag -d {tagName} failed (exit {result.ExitCode}): {result.StdErr.Trim()}");
     }
 
+    // ------------------------------------------------------------------
+    // Remote / network operations
+    // ------------------------------------------------------------------
+
+    public static IReadOnlyList<RemoteInfo> GetRemotes(string repoRoot)
+    {
+        if (!IsRepo(repoRoot)) return Array.Empty<RemoteInfo>();
+
+        var result = Run(repoRoot, "remote", "-v");
+        if (result.ExitCode != 0) return Array.Empty<RemoteInfo>();
+
+        // Each remote prints two lines (fetch + push); we only keep fetch URLs
+        // and dedupe by remote name to preserve declaration order.
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var list = new List<RemoteInfo>();
+        foreach (var line in result.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var trimmed = line.TrimEnd('\r').Trim();
+            if (string.IsNullOrEmpty(trimmed)) continue;
+            if (!trimmed.EndsWith("(fetch)", StringComparison.Ordinal)) continue;
+
+            var firstTab = trimmed.IndexOf('\t');
+            var firstSpace = trimmed.IndexOf(' ');
+            if (firstTab < 0 || firstSpace < firstTab) continue;
+            var name = trimmed[..firstTab].Trim();
+            var url = trimmed[(firstTab + 1)..firstSpace].Trim();
+            if (string.IsNullOrEmpty(name) || !seen.Add(name)) continue;
+            list.Add(new RemoteInfo(name, url));
+        }
+        return list;
+    }
+
+    public static void AddRemote(string repoRoot, string name, string url)
+    {
+        if (!IsRepo(repoRoot))
+            throw new InvalidOperationException($"{repoRoot} is not a Git repo.");
+
+        var result = Run(repoRoot, "remote", "add", name, url);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException(
+                $"git remote add {name} failed (exit {result.ExitCode}): {result.StdErr.Trim()}");
+    }
+
+    public static void RemoveRemote(string repoRoot, string name)
+    {
+        if (!IsRepo(repoRoot))
+            throw new InvalidOperationException($"{repoRoot} is not a Git repo.");
+
+        var result = Run(repoRoot, "remote", "remove", name);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException(
+                $"git remote remove {name} failed (exit {result.ExitCode}): {result.StdErr.Trim()}");
+    }
+
+    public static void SetRemoteUrl(string repoRoot, string name, string url)
+    {
+        if (!IsRepo(repoRoot))
+            throw new InvalidOperationException($"{repoRoot} is not a Git repo.");
+
+        var result = Run(repoRoot, "remote", "set-url", name, url);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException(
+                $"git remote set-url {name} failed (exit {result.ExitCode}): {result.StdErr.Trim()}");
+    }
+
+    /// <summary>
+    /// Returns the configured upstream for <paramref name="branch"/> as a
+    /// (remote, remoteBranch) pair, or null when the branch has no upstream.
+    /// Resolved via rev-parse @{upstream}; an exit-1 means "no upstream", not
+    /// an error condition.
+    /// </summary>
+    public static UpstreamInfo? GetUpstream(string repoRoot, string branch)
+    {
+        if (!IsRepo(repoRoot) || string.IsNullOrEmpty(branch)) return null;
+        if (branch == "(detached)") return null;
+
+        var result = Run(repoRoot,
+            "rev-parse", "--abbrev-ref", "--symbolic-full-name", $"{branch}@{{u}}");
+        if (result.ExitCode != 0) return null;
+
+        var full = result.StdOut.Trim();
+        if (string.IsNullOrEmpty(full)) return null;
+
+        var slash = full.IndexOf('/');
+        if (slash <= 0 || slash >= full.Length - 1) return null;
+        return new UpstreamInfo(full[..slash], full[(slash + 1)..]);
+    }
+
+    public static void SetUpstream(string repoRoot, string branch, string remote, string remoteBranch)
+    {
+        if (!IsRepo(repoRoot))
+            throw new InvalidOperationException($"{repoRoot} is not a Git repo.");
+
+        var result = Run(repoRoot, "branch", $"--set-upstream-to={remote}/{remoteBranch}", branch);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException(
+                $"git branch --set-upstream-to failed (exit {result.ExitCode}): {result.StdErr.Trim()}");
+    }
+
+    /// <summary>
+    /// Ahead/behind counts of <paramref name="branch"/> relative to its
+    /// configured upstream. Zero/zero when no upstream is configured (caller
+    /// should check GetUpstream first if it needs to distinguish "in sync"
+    /// from "no upstream").
+    /// </summary>
+    public static AheadBehind GetAheadBehind(string repoRoot, string branch)
+    {
+        if (!IsRepo(repoRoot) || string.IsNullOrEmpty(branch)) return default;
+        if (branch == "(detached)") return default;
+
+        var upstream = GetUpstream(repoRoot, branch);
+        if (upstream is null) return default;
+
+        var spec = $"{upstream.Remote}/{upstream.RemoteBranch}...{branch}";
+        var result = Run(repoRoot, "rev-list", "--left-right", "--count", spec);
+        if (result.ExitCode != 0) return default;
+
+        var parts = result.StdOut.Trim().Split(new[] { '\t', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2) return default;
+        int.TryParse(parts[0], out var behind);
+        int.TryParse(parts[1], out var ahead);
+        return new AheadBehind(ahead, behind);
+    }
+
+    public static NetworkResult Fetch(string repoRoot, string remote)
+    {
+        if (!IsRepo(repoRoot)) return new NetworkResult(false, "Not a Git repo.");
+        var result = RunNetwork(repoRoot, "fetch", "--prune", remote);
+        return new NetworkResult(
+            result.ExitCode == 0,
+            result.ExitCode == 0
+                ? FirstNonEmptyLine(result.StdErr, result.StdOut) ?? $"Fetched {remote}."
+                : ExtractFailureMessage(result));
+    }
+
+    /// <summary>
+    /// Fast-forward-only pull. Refuses to pull when local has diverged from
+    /// the remote; the caller surfaces the rejection and the user falls back
+    /// to a real merge in Phase 5.
+    /// </summary>
+    public static NetworkResult Pull(string repoRoot, string remote, string remoteBranch)
+    {
+        if (!IsRepo(repoRoot)) return new NetworkResult(false, "Not a Git repo.");
+        var result = RunNetwork(repoRoot, "pull", "--ff-only", remote, remoteBranch);
+        return new NetworkResult(
+            result.ExitCode == 0,
+            result.ExitCode == 0
+                ? "Pulled from " + remote + "/" + remoteBranch + "."
+                : ExtractFailureMessage(result));
+    }
+
+    public static NetworkResult Push(string repoRoot, string remote, string branch, bool setUpstream)
+    {
+        if (!IsRepo(repoRoot)) return new NetworkResult(false, "Not a Git repo.");
+        var args = setUpstream
+            ? new[] { "push", "-u", remote, branch }
+            : new[] { "push", remote, branch };
+        var result = RunNetwork(repoRoot, args);
+        return new NetworkResult(
+            result.ExitCode == 0,
+            result.ExitCode == 0
+                ? "Pushed to " + remote + "/" + branch + "."
+                : ExtractFailureMessage(result));
+    }
+
+    private static string ExtractFailureMessage(ProcResult result)
+    {
+        var msg = FirstNonEmptyLine(result.StdErr, result.StdOut);
+        if (string.IsNullOrEmpty(msg)) msg = $"git exited {result.ExitCode}.";
+        return msg!;
+    }
+
+    private static string? FirstNonEmptyLine(params string[] sources)
+    {
+        foreach (var s in sources)
+        {
+            if (string.IsNullOrWhiteSpace(s)) continue;
+            foreach (var line in s.Split('\n'))
+            {
+                var trimmed = line.TrimEnd('\r').Trim();
+                if (!string.IsNullOrEmpty(trimmed)) return trimmed;
+            }
+        }
+        return null;
+    }
+
     /// <summary>
     /// Returns the union of .gh files tracked on <paramref name="targetBranch"/>
     /// and currently in the working tree - i.e. every .gh that may be
@@ -616,6 +806,22 @@ public static class GLoomRepository
 
     private static ProcResult Run(string workingDir, params string[] args)
     {
+        return RunInternal(workingDir, args, suppressTerminalPrompt: false);
+    }
+
+    /// <summary>
+    /// Run a git command that may need credentials. Sets GIT_TERMINAL_PROMPT=0
+    /// so git exits with a clear error if no credential helper resolves auth -
+    /// otherwise git would block forever waiting on a TTY that doesn't exist
+    /// inside Rhino's process.
+    /// </summary>
+    private static ProcResult RunNetwork(string workingDir, params string[] args)
+    {
+        return RunInternal(workingDir, args, suppressTerminalPrompt: true);
+    }
+
+    private static ProcResult RunInternal(string workingDir, string[] args, bool suppressTerminalPrompt)
+    {
         var psi = new ProcessStartInfo
         {
             FileName = GitBinary(),
@@ -626,6 +832,9 @@ public static class GLoomRepository
             CreateNoWindow = true,
         };
         foreach (var a in args) psi.ArgumentList.Add(a);
+
+        if (suppressTerminalPrompt)
+            psi.EnvironmentVariables["GIT_TERMINAL_PROMPT"] = "0";
 
         try
         {
