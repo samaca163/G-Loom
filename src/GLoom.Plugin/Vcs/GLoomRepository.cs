@@ -15,7 +15,7 @@ namespace GLoom.Vcs;
 /// </summary>
 public static class GLoomRepository
 {
-    public sealed record CommitInfo(string Sha, string Author, DateTimeOffset When, string Message);
+    public sealed record CommitInfo(string Sha, string Author, DateTimeOffset When, string Message, string Body = "");
     public sealed record RepoStatus(string Branch, CommitInfo? LastCommit);
     public sealed record BranchInfo(string Name, bool IsCurrent);
     public sealed record ForkPoint(string ParentBranch, string ForkSha);
@@ -31,13 +31,18 @@ public static class GLoomRepository
     private const char FieldSep = '';
     private const char RecordSep = '';
 
-    public static string? Commit(
+    /// <summary>
+    /// Writes the canonical JSON next to the .gh, stages it (and optionally the
+    /// .gh too), and returns the repo-relative paths actually staged. An empty
+    /// list means there is nothing to commit, so the caller can bail before
+    /// prompting the user for a message. A .gh-only change (no JSON delta) is
+    /// still a real commit, which is why the gate is "what's staged", not
+    /// "does the canonical diff show anything".
+    /// </summary>
+    public static IReadOnlyList<string> StageForCommit(
         string repoRoot,
         string canonicalJson,
         string canonicalJsonFullPath,
-        string message,
-        string authorName,
-        string authorEmail,
         string? alsoStageFullPath = null)
     {
         if (string.IsNullOrWhiteSpace(repoRoot))
@@ -45,7 +50,6 @@ public static class GLoomRepository
 
         EnsureDirectoryAndRepo(repoRoot);
 
-        // Write the canonical JSON next to the .gh.
         var jsonDir = Path.GetDirectoryName(canonicalJsonFullPath);
         if (!string.IsNullOrEmpty(jsonDir)) Directory.CreateDirectory(jsonDir);
         File.WriteAllText(canonicalJsonFullPath, canonicalJson);
@@ -59,22 +63,71 @@ public static class GLoomRepository
             Run(repoRoot, "add", "--", alsoRel);
         }
 
-        // Anything actually staged?
+        var staged = Run(repoRoot, "diff", "--cached", "--name-only");
+        if (string.IsNullOrWhiteSpace(staged.StdOut))
+            return Array.Empty<string>();
+
+        return staged.StdOut
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(p => p.Trim('\r', ' '))
+            .Where(p => p.Length > 0)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Commits whatever is currently staged. Subject and body are passed as two
+    /// separate --message flags; git joins them with a blank line, so the body
+    /// (including any trailing <c>Gloom-Version:</c> trailer) lands as its own
+    /// paragraph(s). Returns the new commit SHA, or null if nothing was staged.
+    /// </summary>
+    public static string? CommitStaged(
+        string repoRoot,
+        string subject,
+        string? body,
+        string authorName,
+        string authorEmail)
+    {
+        if (string.IsNullOrWhiteSpace(repoRoot))
+            throw new ArgumentException("Repo root is required.", nameof(repoRoot));
+
         var staged = Run(repoRoot, "diff", "--cached", "--name-only");
         if (string.IsNullOrWhiteSpace(staged.StdOut))
             return null;
 
-        var commit = Run(repoRoot,
+        var args = new List<string>
+        {
             "-c", $"user.name={authorName}",
             "-c", $"user.email={authorEmail}",
-            "commit", "--message", message);
+            "commit", "--message", subject,
+        };
+        if (!string.IsNullOrWhiteSpace(body))
+        {
+            args.Add("--message");
+            args.Add(body);
+        }
 
+        var commit = Run(repoRoot, args.ToArray());
         if (commit.ExitCode != 0)
             throw new InvalidOperationException(
                 $"git commit failed (exit {commit.ExitCode}): {commit.StdErr.Trim()}");
 
         var sha = Run(repoRoot, "rev-parse", "HEAD");
         return sha.ExitCode == 0 ? sha.StdOut.Trim() : null;
+    }
+
+    /// <summary>
+    /// Unstages the given repo-relative paths (<c>git reset -- &lt;paths&gt;</c>),
+    /// used when the user cancels the commit dialog after we've already staged.
+    /// A no-op on a repo with no HEAD yet (first-ever commit); the staged files
+    /// simply stay staged, which is harmless.
+    /// </summary>
+    public static void UnstagePaths(string repoRoot, IEnumerable<string> repoRelativePaths)
+    {
+        if (!IsRepo(repoRoot)) return;
+        var args = new List<string> { "reset", "--quiet", "--" };
+        foreach (var p in repoRelativePaths) args.Add(p.Replace('\\', '/'));
+        if (args.Count == 3) return;
+        Run(repoRoot, args.ToArray());
     }
 
     /// <summary>
@@ -91,7 +144,7 @@ public static class GLoomRepository
         if (!IsRepo(repoRoot)) return Array.Empty<CommitInfo>();
         if (limit <= 0) limit = 10;
 
-        var fmt = $"%H{FieldSep}%an{FieldSep}%aI{FieldSep}%s{RecordSep}";
+        var fmt = $"%H{FieldSep}%an{FieldSep}%aI{FieldSep}%s{FieldSep}%b{RecordSep}";
         var args = new List<string> { "log", $"-n{limit}", $"--pretty=format:{fmt}" };
         if (repoRelativeFiles is not null)
         {
@@ -107,7 +160,8 @@ public static class GLoomRepository
             var parts = rec.Trim('\n', '\r').Split(FieldSep);
             if (parts.Length < 4) continue;
             DateTimeOffset.TryParse(parts[2], out var when);
-            list.Add(new CommitInfo(parts[0], parts[1], when, parts[3]));
+            var body = parts.Length >= 5 ? parts[4].Trim('\n', '\r') : "";
+            list.Add(new CommitInfo(parts[0], parts[1], when, parts[3], body));
         }
         return list;
     }
@@ -131,7 +185,7 @@ public static class GLoomRepository
 
         var args = new List<string>
         {
-            "log", "-1", $"--pretty=format:%H{FieldSep}%an{FieldSep}%aI{FieldSep}%s",
+            "log", "-1", $"--pretty=format:%H{FieldSep}%an{FieldSep}%aI{FieldSep}%s{FieldSep}%b",
         };
         if (repoRelativeFiles is not null)
         {
@@ -147,7 +201,8 @@ public static class GLoomRepository
             if (parts.Length >= 4)
             {
                 DateTimeOffset.TryParse(parts[2], out var when);
-                last = new CommitInfo(parts[0], parts[1], when, parts[3]);
+                var body = parts.Length >= 5 ? parts[4].Trim('\n', '\r') : "";
+                last = new CommitInfo(parts[0], parts[1], when, parts[3], body);
             }
         }
         return new RepoStatus(branchName, last);
