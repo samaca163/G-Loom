@@ -683,15 +683,17 @@ public sealed class CanvasDiffOverlay
                 : ChangeBucket.Modified;
             if (!ShowsBucket(s, bucket)) continue;
 
-            var color = change.Kinds == ObjectChangeKind.Moved ? MovedColor : ModifiedColor;
-            PaintHalo(graphics, live, color);
+            var pen = change.Kinds == ObjectChangeKind.Moved
+                ? OverlayResources.HaloMoved
+                : OverlayResources.HaloModified;
+            PaintHalo(graphics, live, pen);
         }
 
         if (s.ShowAdded)
         {
             foreach (var added in diff.ObjectsAdded)
                 if (liveById.TryGetValue(added.InstanceGuid, out var live))
-                    PaintHalo(graphics, live, AddedColor);
+                    PaintHalo(graphics, live, OverlayResources.HaloAdded);
         }
 
         // Panel previews follow the HoverDetailsOnly mode: in always-show,
@@ -735,8 +737,8 @@ public sealed class CanvasDiffOverlay
         var liveBounds = live.Attributes?.Bounds ?? RectangleF.Empty;
         if (liveBounds.IsEmpty) return;
 
-        using var headerFont = new Font("Segoe UI", 8f, FontStyle.Bold);
-        using var bodyFont = new Font("Segoe UI", 9f);
+        var headerFont = OverlayResources.F8Bold;
+        var bodyFont = OverlayResources.F9;
 
         var maxBodyWidth = Math.Max(liveBounds.Width, 220f) - 12f;
         var headerSize = g.MeasureString("was:", headerFont);
@@ -750,30 +752,25 @@ public sealed class CanvasDiffOverlay
             boxW,
             boxH);
 
-        using var fill = new SolidBrush(Color.FromArgb(235, 252, 245, 200));
-        using var outline = new Pen(Color.FromArgb(220, 230, 200, 0), 1.5f);
-        g.FillRectangle(fill, box);
-        g.DrawRectangle(outline, box.X, box.Y, box.Width, box.Height);
+        g.FillRectangle(OverlayResources.PanelPreviewFill, box);
+        g.DrawRectangle(OverlayResources.YellowOutline, box.X, box.Y, box.Width, box.Height);
 
-        using var headerBrush = new SolidBrush(Color.FromArgb(255, 110, 80, 0));
-        g.DrawString("was:", headerFont, headerBrush, box.X + 6f, box.Y + 5f);
+        g.DrawString("was:", headerFont, OverlayResources.PanelPreviewHeader, box.X + 6f, box.Y + 5f);
 
-        using var bodyBrush = new SolidBrush(Color.FromArgb(255, 60, 50, 10));
         var bodyRect = new RectangleF(
             box.X + 6f,
             box.Y + 5f + headerSize.Height + 2f,
             box.Width - 12f,
             bodySize.Height);
-        g.DrawString(oldText, bodyFont, bodyBrush, bodyRect);
+        g.DrawString(oldText, bodyFont, OverlayResources.PanelPreviewBody, bodyRect);
     }
 
-    private static void PaintHalo(Graphics g, IGH_DocumentObject obj, Color color)
+    private static void PaintHalo(Graphics g, IGH_DocumentObject obj, Pen pen)
     {
         var bounds = obj.Attributes?.Bounds ?? RectangleF.Empty;
         if (bounds.IsEmpty) return;
         var halo = bounds;
         halo.Inflate(6f, 6f);
-        using var pen = new Pen(color, 3f);
         g.DrawRectangle(pen, halo.X, halo.Y, halo.Width, halo.Height);
     }
 
@@ -798,13 +795,9 @@ public sealed class CanvasDiffOverlay
             liveBounds.Width,
             liveBounds.Height);
 
-        using var fill = new SolidBrush(Color.FromArgb(40, 60, 130, 220));
-        using var outline = new Pen(Color.FromArgb(200, 60, 130, 220), 2f)
-        {
-            DashStyle = DashStyle.Dash,
-        };
-        g.FillRectangle(fill, oldBounds);
-        g.DrawRectangle(outline, oldBounds.X, oldBounds.Y, oldBounds.Width, oldBounds.Height);
+        g.FillRectangle(OverlayResources.TrailFill, oldBounds);
+        g.DrawRectangle(OverlayResources.TrailOutline,
+            oldBounds.X, oldBounds.Y, oldBounds.Width, oldBounds.Height);
 
         var oldCenter = new PointF(
             oldBounds.X + oldBounds.Width / 2f,
@@ -817,13 +810,7 @@ public sealed class CanvasDiffOverlay
         // - happens during attribute sync and reads as visual noise).
         var manhattan = Math.Abs(oldCenter.X - newCenter.X) + Math.Abs(oldCenter.Y - newCenter.Y);
         if (manhattan >= 8f)
-        {
-            using var arrowPen = new Pen(MovedColor, 2.5f)
-            {
-                CustomEndCap = new AdjustableArrowCap(5f, 6f, true),
-            };
-            g.DrawLine(arrowPen, oldCenter, newCenter);
-        }
+            g.DrawLine(OverlayResources.MovedArrow, oldCenter, newCenter);
 
         return oldBounds;
     }
@@ -852,7 +839,7 @@ public sealed class CanvasDiffOverlay
         // matches live since the swatch IS the visual. Other kinds cap
         // at a small height so a tall live component doesn't produce
         // a tall mostly-empty ghost.
-        using var labelFontForSizing = new Font("Segoe UI", 8f);
+        var labelFontForSizing = OverlayResources.F8;
         var ghostX = liveBounds.X;
         var ghostWidth = liveBounds.Width;
         float ghostHeight;
@@ -902,11 +889,8 @@ public sealed class CanvasDiffOverlay
             ghostWidth,
             ghostHeight);
 
-        using var ghostFill = new SolidBrush(Color.FromArgb(50, 230, 200, 0));
-        using var ghostOutline = new Pen(Color.FromArgb(220, 230, 200, 0), 1.5f)
-        {
-            DashStyle = DashStyle.Dot,
-        };
+        var ghostFill = OverlayResources.GhostFill;
+        var ghostOutline = OverlayResources.YellowDottedOutline;
 
         if (oldKind == "color" && !string.IsNullOrEmpty(oldData?.ColorArgb))
         {
@@ -916,10 +900,9 @@ public sealed class CanvasDiffOverlay
             g.DrawRectangle(ghostOutline, ghost.X, ghost.Y, ghost.Width, ghost.Height);
 
             var hsvaLabel = ColorHsvaLabel(swatchColor);
-            using var font = new Font("Segoe UI", 8f);
-            using var textBrush = new SolidBrush(Color.FromArgb(220, 110, 80, 0));
+            var font = OverlayResources.F8;
             var size = g.MeasureString(hsvaLabel, font);
-            g.DrawString(hsvaLabel, font, textBrush,
+            g.DrawString(hsvaLabel, font, OverlayResources.GhostText,
                 ghost.X + Math.Max(4f, (ghost.Width - size.Width) / 2f),
                 ghost.Bottom + 2f);
             return ghost;
@@ -946,8 +929,7 @@ public sealed class CanvasDiffOverlay
         var label = OldStateLabel(from.Persistent, to.Persistent);
         if (!string.IsNullOrEmpty(label))
         {
-            using var font = new Font("Segoe UI", 8f, FontStyle.Regular);
-            using var textBrush = new SolidBrush(Color.FromArgb(220, 110, 80, 0));
+            var font = OverlayResources.F8;
             // Measure with the same inner width DrawString uses, so the
             // wrap count agrees and we don't underestimate height.
             var innerWidth = Math.Max(20f, ghost.Width - 8f);
@@ -960,7 +942,7 @@ public sealed class CanvasDiffOverlay
             var y = multiline
                 ? ghost.Y + 4f
                 : ghost.Bottom - measured.Height - 2f;
-            g.DrawString(label, font, textBrush,
+            g.DrawString(label, font, OverlayResources.GhostText,
                 new RectangleF(ghost.X + 4f, y, innerWidth, measured.Height));
         }
 
@@ -974,7 +956,7 @@ public sealed class CanvasDiffOverlay
         // the value), the changed end renders in orange so the reader can
         // tell at a glance "the slider's range was different here", not
         // just the position on the track.
-        using var rangeFont = new Font("Segoe UI", 7.5f);
+        var rangeFont = OverlayResources.F75;
         var minText = FormatSliderValue(oldSv.Min, oldSv.Decimals);
         var maxText = FormatSliderValue(oldSv.Max, oldSv.Decimals);
         var minSize = g.MeasureString(minText, rangeFont);
@@ -985,8 +967,7 @@ public sealed class CanvasDiffOverlay
         var trackRight = ghost.Right - 4f - maxSize.Width - 4f;
         if (trackRight <= trackLeft) return;
 
-        using var trackPen = new Pen(Color.FromArgb(180, 130, 100, 0), 1.5f);
-        g.DrawLine(trackPen, trackLeft, trackY, trackRight, trackY);
+        g.DrawLine(OverlayResources.SliderTrack, trackLeft, trackY, trackRight, trackY);
 
         var range = (float)(oldSv.Max - oldSv.Min);
         var ratio = range > 0
@@ -995,17 +976,15 @@ public sealed class CanvasDiffOverlay
         ratio = Math.Clamp(ratio, 0f, 1f);
         var knobX = trackLeft + ratio * (trackRight - trackLeft);
 
-        using var knobBrush = new SolidBrush(Color.FromArgb(230, 180, 140, 0));
+        var knobBrush = OverlayResources.Brush(Color.FromArgb(230, 180, 140, 0));
         var knobR = 4.5f;
         g.FillEllipse(knobBrush, knobX - knobR, trackY - knobR, knobR * 2f, knobR * 2f);
 
-        var defaultColor = Color.FromArgb(220, 130, 100, 0);
-        var changedColor = Color.FromArgb(255, 230, 120, 20);
         var minChanged = newSv is not null && newSv.Min != oldSv.Min;
         var maxChanged = newSv is not null && newSv.Max != oldSv.Max;
 
-        using var minBrush = new SolidBrush(minChanged ? changedColor : defaultColor);
-        using var maxBrush = new SolidBrush(maxChanged ? changedColor : defaultColor);
+        var minBrush = minChanged ? OverlayResources.SliderRangeChanged : OverlayResources.SliderRangeDefault;
+        var maxBrush = maxChanged ? OverlayResources.SliderRangeChanged : OverlayResources.SliderRangeDefault;
 
         g.DrawString(minText, rangeFont, minBrush,
             ghost.Left + 4f, trackY - minSize.Height / 2f);
@@ -1102,17 +1081,15 @@ public sealed class CanvasDiffOverlay
             g.FillRectangle(lgb, bar);
         }
 
-        using var outline = new Pen(outlineColor, 1.5f);
-        g.DrawRectangle(outline, bar.X, bar.Y, bar.Width, bar.Height);
+        g.DrawRectangle(OverlayResources.Pen15(outlineColor), bar.X, bar.Y, bar.Width, bar.Height);
 
         // Stop-count label sits BELOW the bar, dark brown-olive so it
         // reads against the canvas grid the same way the MD slider
         // and color-swatch labels do.
-        using var font = new Font("Segoe UI", 8f);
-        using var textBrush = new SolidBrush(Color.FromArgb(230, 110, 80, 0));
+        var font = OverlayResources.F8;
         var label = $"was: {sorted.Count} stop{(sorted.Count == 1 ? "" : "s")}";
         var size = g.MeasureString(label, font);
-        g.DrawString(label, font, textBrush,
+        g.DrawString(label, font, OverlayResources.GhostLabelText,
             rect.X + Math.Max(4f, (rect.Width - size.Width) / 2f),
             rect.Bottom + 2f);
     }
@@ -1128,28 +1105,25 @@ public sealed class CanvasDiffOverlay
         var box = RectangleF.Inflate(rect, -4f, -4f);
         if (box.Width <= 2f || box.Height <= 2f) return;
 
-        using var fill = new SolidBrush(Color.FromArgb(40, outlineColor.R, outlineColor.G, outlineColor.B));
-        using var outline = new Pen(outlineColor, 1.5f);
-        g.FillRectangle(fill, box);
-        g.DrawRectangle(outline, box.X, box.Y, box.Width, box.Height);
+        g.FillRectangle(OverlayResources.Fill40(outlineColor), box);
+        g.DrawRectangle(OverlayResources.Pen15(outlineColor), box.X, box.Y, box.Width, box.Height);
 
         var nx = (float)Math.Clamp(md.X, 0d, 1d);
         var ny = (float)Math.Clamp(md.Y, 0d, 1d);
         // GH's MD slider uses (0,0) bottom-left, (1,1) top-right; screen
         // Y is top-down, so flip ny when projecting onto the box.
         var dot = new PointF(box.X + nx * box.Width, box.Y + (1f - ny) * box.Height);
-        using var knobBrush = new SolidBrush(knobColor);
+        var knobBrush = OverlayResources.Brush(knobColor);
         const float r = 5f;
         g.FillEllipse(knobBrush, dot.X - r, dot.Y - r, r * 2f, r * 2f);
 
-        using var font = new Font("Segoe UI", 7.5f);
+        var font = OverlayResources.F75;
         // Match the dark brown-olive used for color-swatch labels — the
         // light-yellow outline color is too pale to read against the
         // ghost fill and the canvas grid.
-        using var textBrush = new SolidBrush(Color.FromArgb(230, 110, 80, 0));
         var label = $"was: ({md.X:0.##}, {md.Y:0.##})";
         var size = g.MeasureString(label, font);
-        g.DrawString(label, font, textBrush,
+        g.DrawString(label, font, OverlayResources.GhostLabelText,
             rect.X + Math.Max(2f, (rect.Width - size.Width) / 2f),
             rect.Bottom + 2f);
     }
@@ -1217,15 +1191,12 @@ public sealed class CanvasDiffOverlay
 
     private static Color? TryParseArgb(string hex)
     {
-        try
-        {
-            var argb = unchecked((int)Convert.ToUInt32(hex, 16));
-            return Color.FromArgb(argb);
-        }
-        catch
-        {
-            return null;
-        }
+        // TryParse instead of Convert-with-catch: this runs inside gradient
+        // stop loops, and malformed hex used to throw per stop per frame.
+        if (uint.TryParse(hex, System.Globalization.NumberStyles.HexNumber,
+                System.Globalization.CultureInfo.InvariantCulture, out var value))
+            return Color.FromArgb(unchecked((int)value));
+        return null;
     }
 
     /// <summary>
@@ -1290,11 +1261,7 @@ public sealed class CanvasDiffOverlay
             }
         }
 
-        using var pen = new Pen(Color.FromArgb(220, 220, 40, 40), 1.8f)
-        {
-            DashStyle = DashStyle.Dash,
-            CustomEndCap = new AdjustableArrowCap(5f, 6f, true),
-        };
+        var pen = OverlayResources.MissingWire;
 
         // Pass 1: live consumers with WiresChanged. The consumer anchor
         // is the SPECIFIC input port's InputGrip (X / Y / Z on a Pt
@@ -1366,7 +1333,7 @@ public sealed class CanvasDiffOverlay
         var liveOutputAnchors = BuildLiveOutputAnchors(doc);
         if (liveOutputAnchors.Count == 0) return;
 
-        using var pen = new Pen(Color.FromArgb(220, 60, 200, 60), 2.5f);
+        var pen = OverlayResources.AddedWire;
 
         // Pass A: brand-new components - every input source is new.
         foreach (var added in diff.ObjectsAdded)
@@ -1517,10 +1484,8 @@ public sealed class CanvasDiffOverlay
             rect = new RectangleF(deleted.Pivot.X, deleted.Pivot.Y, 100f, 60f);
         }
 
-        using var fill = new SolidBrush(Color.FromArgb(40, 220, 40, 40));
-        using var outline = new Pen(RemovedColor, 2.5f);
-        g.FillRectangle(fill, rect);
-        g.DrawRectangle(outline, rect.X, rect.Y, rect.Width, rect.Height);
+        g.FillRectangle(OverlayResources.RedGhostFill, rect);
+        g.DrawRectangle(OverlayResources.RedGhostOutline, rect.X, rect.Y, rect.Width, rect.Height);
 
         switch (deleted.Persistent?.Kind)
         {
@@ -1544,10 +1509,9 @@ public sealed class CanvasDiffOverlay
         var name = string.IsNullOrEmpty(deleted.Nickname) ? deleted.Name : deleted.Nickname;
         if (!string.IsNullOrEmpty(name))
         {
-            using var font = new Font("Segoe UI", 9f, FontStyle.Bold);
-            using var textBrush = new SolidBrush(Color.FromArgb(255, 200, 30, 30));
+            var font = OverlayResources.F9Bold;
             var size = g.MeasureString(name, font);
-            g.DrawString(name, font, textBrush,
+            g.DrawString(name, font, OverlayResources.RedName,
                 rect.X + (rect.Width - size.Width) / 2f,
                 rect.Bottom + 2f);
         }
@@ -1559,7 +1523,7 @@ public sealed class CanvasDiffOverlay
     {
         if (sv is null) return;
 
-        using var rangeFont = new Font("Segoe UI", 7.5f);
+        var rangeFont = OverlayResources.F75;
         var minText = FormatSliderValue(sv.Min, sv.Decimals);
         var maxText = FormatSliderValue(sv.Max, sv.Decimals);
         var minSize = g.MeasureString(minText, rangeFont);
@@ -1570,8 +1534,7 @@ public sealed class CanvasDiffOverlay
         var trackRight = rect.Right - 4f - maxSize.Width - 4f;
         if (trackRight <= trackLeft) return;
 
-        using var trackPen = new Pen(Color.FromArgb(220, 180, 30, 30), 1.5f);
-        g.DrawLine(trackPen, trackLeft, trackY, trackRight, trackY);
+        g.DrawLine(OverlayResources.RedTrack, trackLeft, trackY, trackRight, trackY);
 
         var range = (float)(sv.Max - sv.Min);
         var ratio = range > 0
@@ -1580,23 +1543,20 @@ public sealed class CanvasDiffOverlay
         ratio = Math.Clamp(ratio, 0f, 1f);
         var knobX = trackLeft + ratio * (trackRight - trackLeft);
 
-        using var knobBrush = new SolidBrush(Color.FromArgb(240, 220, 40, 40));
         var knobR = 4.5f;
-        g.FillEllipse(knobBrush, knobX - knobR, trackY - knobR, knobR * 2f, knobR * 2f);
+        g.FillEllipse(OverlayResources.RedKnob, knobX - knobR, trackY - knobR, knobR * 2f, knobR * 2f);
 
-        using var rangeBrush = new SolidBrush(Color.FromArgb(220, 180, 30, 30));
-        g.DrawString(minText, rangeFont, rangeBrush, rect.Left + 4f, trackY - minSize.Height / 2f);
-        g.DrawString(maxText, rangeFont, rangeBrush, rect.Right - 4f - maxSize.Width, trackY - maxSize.Height / 2f);
+        g.DrawString(minText, rangeFont, OverlayResources.RedRange, rect.Left + 4f, trackY - minSize.Height / 2f);
+        g.DrawString(maxText, rangeFont, OverlayResources.RedRange, rect.Right - 4f - maxSize.Width, trackY - maxSize.Height / 2f);
 
         // Lift the value text out of the rect so it doesn't compete
         // with the track line for short slider bounds (where 'top + 2'
         // pushes the glyphs into the track at 62% height). Mirrors the
         // pattern of placing the component name below the rect.
         var valueText = FormatSliderValue(sv.Value, sv.Decimals);
-        using var valueFont = new Font("Segoe UI", 9f, FontStyle.Bold);
-        using var valueBrush = new SolidBrush(Color.FromArgb(255, 180, 20, 20));
+        var valueFont = OverlayResources.F9Bold;
         var valSize = g.MeasureString(valueText, valueFont);
-        g.DrawString(valueText, valueFont, valueBrush,
+        g.DrawString(valueText, valueFont, OverlayResources.RedValue,
             rect.X + (rect.Width - valSize.Width) / 2f,
             rect.Top - valSize.Height - 2f);
     }
@@ -1604,19 +1564,16 @@ public sealed class CanvasDiffOverlay
     private static void PaintDeletedTextBody(Graphics g, RectangleF rect, string? text)
     {
         var body = string.IsNullOrEmpty(text) ? "(empty)" : text;
-        using var font = new Font("Segoe UI", 8.5f);
-        using var brush = new SolidBrush(Color.FromArgb(255, 180, 20, 20));
         var bodyRect = new RectangleF(rect.X + 4f, rect.Y + 4f, rect.Width - 8f, rect.Height - 8f);
-        g.DrawString(body, font, brush, bodyRect);
+        g.DrawString(body, OverlayResources.F85, OverlayResources.RedValue, bodyRect);
     }
 
     private static void PaintDeletedBoolean(Graphics g, RectangleF rect, bool? state)
     {
         var label = state == true ? "True" : "False";
-        using var font = new Font("Segoe UI", 11f, FontStyle.Bold);
-        using var brush = new SolidBrush(Color.FromArgb(255, 200, 20, 20));
+        var font = OverlayResources.F11Bold;
         var size = g.MeasureString(label, font);
-        g.DrawString(label, font, brush,
+        g.DrawString(label, font, OverlayResources.RedBool,
             rect.X + (rect.Width - size.Width) / 2f,
             rect.Y + (rect.Height - size.Height) / 2f);
     }
@@ -1635,7 +1592,6 @@ public sealed class CanvasDiffOverlay
         var inner = new RectangleF(rect.X + 6f, rect.Y + 6f, rect.Width - 12f, rect.Height - 12f);
         using var swatchFill = new SolidBrush(Color.FromArgb(220, color.R, color.G, color.B));
         g.FillRectangle(swatchFill, inner);
-        using var innerOutline = new Pen(Color.FromArgb(220, 180, 20, 20), 1.5f);
-        g.DrawRectangle(innerOutline, inner.X, inner.Y, inner.Width, inner.Height);
+        g.DrawRectangle(OverlayResources.RedInnerOutline, inner.X, inner.Y, inner.Width, inner.Height);
     }
 }
