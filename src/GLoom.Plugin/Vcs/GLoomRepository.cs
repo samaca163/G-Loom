@@ -706,47 +706,121 @@ public static class GLoomRepository
         if (!IsRepo(repoRoot)) return null;
         if (repoRelativeFiles.Length == 0) return null;
 
-        // 1. Hash every working-tree file as Git would.
-        var expected = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var f in repoRelativeFiles)
+        // 1. Hash every working-tree file as Git would, in ONE invocation
+        //    (one hash per line, argument order). Must be `git hash-object`,
+        //    not in-process SHA-1: git applies clean filters (autocrlf /
+        //    .gitattributes CRLF->LF) before hashing, so raw disk bytes diverge
+        //    from committed blob IDs on Windows checkouts.
+        var rels = new string[repoRelativeFiles.Length];
+        for (var i = 0; i < repoRelativeFiles.Length; i++)
         {
-            var rel = f.Replace('\\', '/');
-            var fullPath = Path.Combine(repoRoot, rel);
-            if (!File.Exists(fullPath)) return null;
-
-            var hash = Run(repoRoot, "hash-object", "--", rel);
-            if (hash.ExitCode != 0) return null;
-            var blob = hash.StdOut.Trim();
-            if (string.IsNullOrEmpty(blob)) return null;
-            expected[rel] = blob;
+            rels[i] = repoRelativeFiles[i].Replace('\\', '/');
+            if (!File.Exists(Path.Combine(repoRoot, rels[i]))) return null;
         }
 
-        // 2. Walk recent commits that touched any of these files, looking for
-        //    one whose tree-blobs match every working-tree blob.
+        var hashArgs = new List<string> { "hash-object", "--" };
+        hashArgs.AddRange(rels);
+        var hash = Run(repoRoot, hashArgs.ToArray());
+        if (hash.ExitCode != 0) return null;
+        var blobs = hash.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        if (blobs.Length != rels.Length) return null;
+
+        var expected = new (string Rel, string Blob)[rels.Length];
+        for (var i = 0; i < rels.Length; i++)
+            expected[i] = (rels[i], blobs[i].Trim());
+
+        // 2. Candidate commits that touched any of these files.
         var logArgs = new List<string> { "log", "-n200", "--format=%H", "--" };
-        foreach (var rel in expected.Keys) logArgs.Add(rel);
+        logArgs.AddRange(rels);
         var commits = Run(repoRoot, logArgs.ToArray());
         if (commits.ExitCode != 0) return null;
+        var candidates = commits.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        if (candidates.Length == 0) return null;
 
-        foreach (var line in commits.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var sha = line.Trim();
-            if (string.IsNullOrEmpty(sha)) continue;
-
-            var allMatch = true;
-            foreach (var kv in expected)
-            {
-                // git ls-tree <commit> -- <path> -> "<mode> <type> <blobSha>\t<path>"
-                var ls = Run(repoRoot, "ls-tree", sha, "--", kv.Key);
-                if (ls.ExitCode != 0 || string.IsNullOrWhiteSpace(ls.StdOut)) { allMatch = false; break; }
-                var firstLine = ls.StdOut.Split('\n')[0];
-                var parts = firstLine.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length < 3 || parts[2].Trim() != kv.Value) { allMatch = false; break; }
-            }
-            if (allMatch) return sha;
-        }
-        return null;
+        // 3. One cat-file process answers every <sha>:<path> blob query,
+        //    replacing the previous ls-tree spawn per commit (~200 process
+        //    launches on a miss - the multi-second post-save freeze).
+        return MatchViaCatFile(repoRoot, candidates, expected);
     }
+
+    private static string? MatchViaCatFile(
+        string repoRoot, string[] candidates, (string Rel, string Blob)[] expected)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = GitBinary(),
+            WorkingDirectory = repoRoot,
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            StandardInputEncoding = new System.Text.UTF8Encoding(false),
+        };
+        psi.ArgumentList.Add("cat-file");
+        psi.ArgumentList.Add("--batch-check");
+
+        Process? proc = null;
+        try
+        {
+            proc = Process.Start(psi);
+            if (proc is null) return null;
+            _ = proc.StandardError.ReadToEndAsync();
+
+            var budget = Stopwatch.StartNew();
+            foreach (var line in candidates)
+            {
+                var sha = line.Trim();
+                if (string.IsNullOrEmpty(sha)) continue;
+
+                var allMatch = true;
+                foreach (var (rel, blob) in expected)
+                {
+                    if (budget.ElapsedMilliseconds > 15_000)
+                    {
+                        Rhino.RhinoApp.WriteLine("[G-Loom] cat-file match walk exceeded 15s; giving up.");
+                        return null;
+                    }
+
+                    // Strict ping-pong: one request, one response. Writing all
+                    // requests up front deadlocks once responses fill the pipe
+                    // buffer while we are still blocked writing stdin.
+                    proc.StandardInput.Write(sha + ":" + rel + "\n");
+                    proc.StandardInput.Flush();
+                    var response = proc.StandardOutput.ReadLine();
+                    if (response is null) return null;
+
+                    // Hit: "<oid> blob <size>". Path absent at that commit:
+                    // "<input> missing". Anything else: treat as non-matching.
+                    var parts = response.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length < 3 || parts[1] != "blob" || parts[0] != blob)
+                    {
+                        allMatch = false;
+                        break;
+                    }
+                }
+                if (allMatch) return sha;
+            }
+            return null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+        finally
+        {
+            if (proc is not null)
+            {
+                try { proc.StandardInput.Close(); } catch { }
+                if (!proc.WaitForExit(2000))
+                {
+                    try { proc.Kill(entireProcessTree: true); } catch { }
+                }
+                proc.Dispose();
+            }
+        }
+    }
+
 
     /// <summary>
     /// Reads the contents of a file as it existed at <paramref name="commitSha"/>
