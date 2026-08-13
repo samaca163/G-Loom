@@ -14,8 +14,22 @@ obj/
 # macOS
 .DS_Store
 
+# Windows
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# Merge leftovers
+*.orig
+*.rej
+
 # Build artifacts
 *.yak
+
+# Release staging
+artifacts/
+dist/
+*.zip
 
 # Local overrides
 *.local.props
