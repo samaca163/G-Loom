@@ -33,12 +33,23 @@ public static class CommitVersioning
     }
 
     /// <summary>
-    /// Resolves the version label from a commit, searching both the subject
-    /// and the body. Dialog-based commits carry the version in a
-    /// <c>Gloom-Version:</c> body trailer (keeping subjects human-readable);
-    /// auto-versioned commits carry it in the subject. Scanning both keeps
-    /// every era of history readable.
+    /// Resolves the version label from a commit. The explicit
+    /// <c>Gloom-Version:</c> body trailer is authoritative - a user-typed
+    /// subject can legitimately contain "_V012"-shaped text and must not
+    /// shadow the real version. The loose subject/body scan is the fallback
+    /// for pre-trailer auto commits and hand-written history.
     /// </summary>
-    public static string? ExtractVersionLabel(GLoomRepository.CommitInfo c) =>
-        ExtractVersionLabel($"{c.Message}\n{c.Body}");
+    public static string? ExtractVersionLabel(GLoomRepository.CommitInfo c)
+    {
+        if (!string.IsNullOrEmpty(c.Body))
+        {
+            foreach (var line in c.Body.Split('\n'))
+            {
+                var trimmed = line.Trim();
+                if (trimmed.StartsWith("Gloom-Version:", System.StringComparison.Ordinal))
+                    return ExtractVersionLabel(trimmed);
+            }
+        }
+        return ExtractVersionLabel($"{c.Message}\n{c.Body}");
+    }
 }

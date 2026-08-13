@@ -63,14 +63,18 @@ public static class GLoomRepository
             Run(repoRoot, "add", "--", alsoRel);
         }
 
-        var staged = Run(repoRoot, "diff", "--cached", "--name-only");
+        // -z: NUL-separated, unquoted output. Without it git C-quotes any
+        // path with non-ASCII bytes ("Definici\303\263n.gh"), and feeding
+        // that literal back to `git reset` on cancel silently unstages
+        // nothing - the stale pair then rides into the NEXT commit.
+        var staged = Run(repoRoot, "diff", "--cached", "--name-only", "-z");
         if (string.IsNullOrWhiteSpace(staged.StdOut))
             return Array.Empty<string>();
 
         var list = new List<string>();
-        foreach (var line in staged.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        foreach (var entry in staged.StdOut.Split('\0', StringSplitOptions.RemoveEmptyEntries))
         {
-            var trimmed = line.Trim('\r', ' ');
+            var trimmed = entry.Trim('\r', '\n', ' ');
             if (trimmed.Length > 0) list.Add(trimmed);
         }
         return list;
