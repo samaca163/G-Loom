@@ -169,11 +169,29 @@ public static class GLoomRepository
         return int.TryParse(result.StdOut.Trim(), out var n) ? n : 0;
     }
 
+    // Every public method guards with IsRepo, which used to spawn a git process
+    // each time - a hidden ~40% multiplier on all git traffic. Memoized per
+    // path for the session; the cheap .git-marker probe detects a repo being
+    // deleted or `git init`-ed underneath a cached answer and forces a re-probe.
+    // ConcurrentDictionary because panel reads run on a background thread.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool>
+        _isRepoCache = new(StringComparer.Ordinal);
+
     public static bool IsRepo(string path)
     {
         if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) return false;
+
+        // .git is a directory in normal repos, a file in worktrees/submodules.
+        var marker = Path.Combine(path, ".git");
+        var markerExists = Directory.Exists(marker) || File.Exists(marker);
+        if (_isRepoCache.TryGetValue(path, out var cached) && cached == markerExists)
+            return cached;
+        _isRepoCache.TryRemove(path, out _);
+
         var result = Run(path, "rev-parse", "--is-inside-work-tree");
-        return result.ExitCode == 0 && result.StdOut.Trim() == "true";
+        var isRepo = result.ExitCode == 0 && result.StdOut.Trim() == "true";
+        if (markerExists || !isRepo) _isRepoCache[path] = isRepo;
+        return isRepo;
     }
 
     // ------------------------------------------------------------------
@@ -766,8 +784,8 @@ public static class GLoomRepository
     {
         if (!Directory.Exists(workingDir))
             Directory.CreateDirectory(workingDir);
-        if (!IsRepo(workingDir))
-            Run(workingDir, "init");
+        if (!IsRepo(workingDir) && Run(workingDir, "init").ExitCode == 0)
+            _isRepoCache[workingDir] = true;
     }
 
     private static string ToRepoRelative(string repoRoot, string fullPath) =>
