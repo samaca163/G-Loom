@@ -132,11 +132,21 @@ public sealed class CanvasDiffOverlay
 
     private enum GhostRestoreKind { Pivot, Persistent, Deleted }
 
-    private sealed record GhostRegion(
+    private readonly record struct GhostRegion(
         RectangleF Rect,
         GhostRestoreKind Kind,
         ObjectChange? Change,
         CanonicalObject? Deleted);
+
+    // Rebuilt once per recompute, read every frame. The old code rebuilt a
+    // Guid.ToString-keyed dictionary of ALL document objects per frame, and
+    // walked every object's outputs TWICE per frame for wire anchors -
+    // O(document) work per paint regardless of diff size. Object references
+    // stay valid between recomputes; per-frame reads are just live
+    // bounds/grip property lookups, so halos and wires still track drags.
+    private readonly Dictionary<string, IGH_DocumentObject> _liveById = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (IGH_Param Param, IGH_DocumentObject Owner)> _liveOutputSources
+        = new(StringComparer.Ordinal);
 
     private void SetAndRefresh(ref bool field, bool value)
     {
@@ -806,8 +816,30 @@ public sealed class CanvasDiffOverlay
         _cachedDiff = diff;
         _cachedFromDoc = fromDoc;
         _diffDoc = diffDoc;
+        RebuildLiveCaches(diff is null ? null : diffDoc);
         RebuildHoverableIndex();
         Instances.ActiveCanvas?.Invalidate();
+    }
+
+    private void RebuildLiveCaches(GH_Document? doc)
+    {
+        _liveById.Clear();
+        _liveOutputSources.Clear();
+        if (doc is null) return;
+
+        foreach (var obj in doc.Objects)
+        {
+            _liveById[obj.InstanceGuid.ToString("D")] = obj;
+            if (obj is IGH_Component comp)
+            {
+                foreach (var output in comp.Params.Output)
+                    _liveOutputSources[output.InstanceGuid.ToString("D")] = (output, comp);
+            }
+            else if (obj is IGH_Param param)
+            {
+                _liveOutputSources[param.InstanceGuid.ToString("D")] = (param, param);
+            }
+        }
     }
 
     private static void Paint(GH_Canvas canvas, DocumentDiff diff, CanvasDiffOverlay s, string? hoveredId)
@@ -822,8 +854,8 @@ public sealed class CanvasDiffOverlay
         s._ghostRegions.Clear();
 
         // Live objects keyed by the same string form CanonicalObject uses
-        // (Guid.ToString("D")), so the lookup matches the diff entries.
-        var liveById = doc.Objects.ToDictionary(o => o.InstanceGuid.ToString("D"));
+        // (Guid.ToString("D")); rebuilt per recompute, not per frame.
+        var liveById = s._liveById;
 
         var deletionRects = new Dictionary<string, RectangleF>(StringComparer.Ordinal);
         if (s.ShowDeleted)
@@ -848,8 +880,8 @@ public sealed class CanvasDiffOverlay
         // bounding-rect edges.
         if (s._cachedFromDoc is not null)
         {
-            PaintMissingWires(graphics, diff, doc, liveById, deletionRects);
-            PaintAddedWires(graphics, diff, doc, liveById);
+            PaintMissingWires(graphics, diff, s._liveOutputSources, liveById, deletionRects);
+            PaintAddedWires(graphics, diff, s._liveOutputSources, liveById);
         }
 
         // Bucket each modified change as either "Moved" (move-only) or
@@ -1442,7 +1474,7 @@ public sealed class CanvasDiffOverlay
     private static void PaintMissingWires(
         Graphics g,
         DocumentDiff diff,
-        GH_Document doc,
+        Dictionary<string, (IGH_Param Param, IGH_DocumentObject Owner)> liveOutputSources,
         Dictionary<string, IGH_DocumentObject> liveById,
         Dictionary<string, RectangleF> deletionRects)
     {
@@ -1450,8 +1482,6 @@ public sealed class CanvasDiffOverlay
         // that appears in downstream input.Sources). Live anchors come
         // from per-port OutputGrip; ghost anchors are distributed
         // along the deletion rect's right edge per output index.
-        var liveOutputAnchors = BuildLiveOutputAnchors(doc);
-
         var ghostOutputAnchors = new Dictionary<string, PointF>(StringComparer.Ordinal);
         foreach (var removed in diff.ObjectsRemoved)
         {
@@ -1496,7 +1526,7 @@ public sealed class CanvasDiffOverlay
 
                 foreach (var src in change.From.Inputs[i].Sources)
                 {
-                    if (!TryFindWireAnchor(src, liveOutputAnchors, ghostOutputAnchors, out var srcAnchor)) continue;
+                    if (!TryFindWireAnchor(src, liveOutputSources, ghostOutputAnchors, out var srcAnchor)) continue;
                     var consumerAnchor = LiveInputAnchor(consumer, consumerInputs, i);
                     DrawWireBezier(g, pen, srcAnchor, consumerAnchor);
                 }
@@ -1517,7 +1547,7 @@ public sealed class CanvasDiffOverlay
                 var consumerAnchor = GhostPortAnchor(rect, leftEdge: true, i, inputCount);
                 foreach (var src in removed.Inputs[i].Sources)
                 {
-                    if (TryFindWireAnchor(src, liveOutputAnchors, ghostOutputAnchors, out var srcAnchor))
+                    if (TryFindWireAnchor(src, liveOutputSources, ghostOutputAnchors, out var srcAnchor))
                         DrawWireBezier(g, pen, srcAnchor, consumerAnchor);
                 }
             }
@@ -1539,11 +1569,10 @@ public sealed class CanvasDiffOverlay
     private static void PaintAddedWires(
         Graphics g,
         DocumentDiff diff,
-        GH_Document doc,
+        Dictionary<string, (IGH_Param Param, IGH_DocumentObject Owner)> liveOutputSources,
         Dictionary<string, IGH_DocumentObject> liveById)
     {
-        var liveOutputAnchors = BuildLiveOutputAnchors(doc);
-        if (liveOutputAnchors.Count == 0) return;
+        if (liveOutputSources.Count == 0) return;
 
         var pen = OverlayResources.AddedWire;
 
@@ -1557,7 +1586,7 @@ public sealed class CanvasDiffOverlay
             {
                 foreach (var src in added.Inputs[i].Sources)
                 {
-                    if (!liveOutputAnchors.TryGetValue(src, out var srcAnchor)) continue;
+                    if (!TryResolveLiveAnchor(liveOutputSources, src, out var srcAnchor)) continue;
                     var consumerAnchor = LiveInputAnchor(consumer, consumerInputs, i);
                     DrawWireBezier(g, pen, srcAnchor, consumerAnchor);
                 }
@@ -1577,7 +1606,7 @@ public sealed class CanvasDiffOverlay
                 foreach (var src in change.To.Inputs[i].Sources)
                 {
                     if (fromSet.Contains(src)) continue;
-                    if (!liveOutputAnchors.TryGetValue(src, out var srcAnchor)) continue;
+                    if (!TryResolveLiveAnchor(liveOutputSources, src, out var srcAnchor)) continue;
                     var consumerAnchor = LiveInputAnchor(consumer, consumerInputs, i);
                     DrawWireBezier(g, pen, srcAnchor, consumerAnchor);
                 }
@@ -1599,38 +1628,29 @@ public sealed class CanvasDiffOverlay
         g.DrawBezier(pen, source, c1, c2, target);
     }
 
-    private static Dictionary<string, PointF> BuildLiveOutputAnchors(GH_Document doc)
+    /// <summary>
+    /// Resolves a live source anchor from the per-recompute param cache.
+    /// The grip is read fresh each frame so wires keep tracking drags;
+    /// falls back to the owning visual's right-edge midpoint when the
+    /// grip isn't available, matching the old per-frame anchor builder.
+    /// </summary>
+    private static bool TryResolveLiveAnchor(
+        Dictionary<string, (IGH_Param Param, IGH_DocumentObject Owner)> liveOutputSources,
+        string sourceGuid,
+        out PointF anchor)
     {
-        var anchors = new Dictionary<string, PointF>(StringComparer.Ordinal);
-        foreach (var obj in doc.Objects)
+        anchor = PointF.Empty;
+        if (!liveOutputSources.TryGetValue(sourceGuid, out var entry)) return false;
+
+        var grip = entry.Param.Attributes?.OutputGrip ?? PointF.Empty;
+        if (grip == PointF.Empty)
         {
-            if (obj is IGH_Component comp)
-            {
-                foreach (var output in comp.Params.Output)
-                {
-                    var grip = output.Attributes?.OutputGrip ?? PointF.Empty;
-                    if (grip == PointF.Empty)
-                    {
-                        var b = comp.Attributes?.Bounds ?? RectangleF.Empty;
-                        if (b.IsEmpty) continue;
-                        grip = new PointF(b.Right, b.Y + b.Height / 2f);
-                    }
-                    anchors[output.InstanceGuid.ToString("D")] = grip;
-                }
-            }
-            else if (obj is IGH_Param param)
-            {
-                var grip = param.Attributes?.OutputGrip ?? PointF.Empty;
-                if (grip == PointF.Empty)
-                {
-                    var b = param.Attributes?.Bounds ?? RectangleF.Empty;
-                    if (b.IsEmpty) continue;
-                    grip = new PointF(b.Right, b.Y + b.Height / 2f);
-                }
-                anchors[param.InstanceGuid.ToString("D")] = grip;
-            }
+            var b = entry.Owner.Attributes?.Bounds ?? RectangleF.Empty;
+            if (b.IsEmpty) return false;
+            grip = new PointF(b.Right, b.Y + b.Height / 2f);
         }
-        return anchors;
+        anchor = grip;
+        return true;
     }
 
     /// <summary>
@@ -1676,11 +1696,11 @@ public sealed class CanvasDiffOverlay
 
     private static bool TryFindWireAnchor(
         string sourceGuid,
-        Dictionary<string, PointF> liveOutputAnchors,
+        Dictionary<string, (IGH_Param Param, IGH_DocumentObject Owner)> liveOutputSources,
         Dictionary<string, PointF> ghostOutputAnchors,
         out PointF anchor)
     {
-        if (liveOutputAnchors.TryGetValue(sourceGuid, out anchor)) return true;
+        if (TryResolveLiveAnchor(liveOutputSources, sourceGuid, out anchor)) return true;
         return ghostOutputAnchors.TryGetValue(sourceGuid, out anchor);
     }
 
