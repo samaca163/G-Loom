@@ -22,5 +22,5 @@ public sealed class GLoomAssemblyInfo : GH_AssemblyInfo
     public override string AuthorContact => "samaca163@gmail.com";
 
     // Keep in lockstep with <Version> in GLoom.Plugin.csproj.
-    public override string Version => "0.2.0";
+    public override string Version => "0.2.1";
 }
