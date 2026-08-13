@@ -490,7 +490,7 @@ public sealed class GLoomPanel : Panel
 
         foreach (var c in commits)
             if (c.Sha == currentSha)
-                return CommitVersioning.ExtractVersionLabel(c.Message)
+                return CommitVersioning.ExtractVersionLabel(c)
                        ?? c.Message;
 
         return currentSha[..7];
@@ -1484,7 +1484,7 @@ public sealed class GLoomPanel : Panel
             Action<string> onDeleteTag,
             Action<bool> onExpansionChanged)
         {
-            var version = CommitVersioning.ExtractVersionLabel(info.Message) ?? "—";
+            var version = CommitVersioning.ExtractVersionLabel(info) ?? "—";
             var sha7 = info.Sha[..7];
             var date = info.When.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
 
