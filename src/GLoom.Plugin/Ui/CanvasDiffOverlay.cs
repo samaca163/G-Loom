@@ -85,6 +85,7 @@ public sealed class CanvasDiffOverlay
         if (_comparisonReference == reference) return;
         _comparisonReference = reference;
         _historicDirty = true;
+        _historicGeneration++;
         _historicUnavailable = false;
         _liveDirty = true;
         SetDiff(null, null, null);
@@ -109,6 +110,12 @@ public sealed class CanvasDiffOverlay
     // cache is concurrent because the fetch stage populates it off-thread.
     private bool _liveDirty = true;
     private bool _historicDirty = true;
+    // Bumped on every event that invalidates the historic side. An in-flight
+    // fetch captured the previous generation, so its completion can tell
+    // that the world moved underneath it (e.g. a commit relocated HEAD while
+    // the old HEAD was still resolving) and must be discarded - the
+    // reference STRING alone can't see that.
+    private int _historicGeneration;
     private bool _historicUnavailable;
     private bool _fetchInFlight;
     private bool _recomputePending;
@@ -187,6 +194,7 @@ public sealed class CanvasDiffOverlay
 
             _liveDirty = true;
             _historicDirty = true;
+            _historicGeneration++;
             _historicUnavailable = false;
             if (fileOrRepoChanged)
             {
@@ -250,6 +258,7 @@ public sealed class CanvasDiffOverlay
         {
             _liveDirty = true;
             _historicDirty = true;
+            _historicGeneration++;
             _historicUnavailable = false;
             ScheduleRecompute();
         }
@@ -735,7 +744,8 @@ public sealed class CanvasDiffOverlay
             _fetchInFlight = true;
             var repo = state.RepoPath;
             var reference = _comparisonReference;
-            System.Threading.Tasks.Task.Run(() => FetchHistoric(repo, jsonRel, reference));
+            var generation = _historicGeneration;
+            System.Threading.Tasks.Task.Run(() => FetchHistoric(repo, jsonRel, reference, generation));
             return;
         }
 
@@ -758,7 +768,7 @@ public sealed class CanvasDiffOverlay
         SetDiff(DocumentDiff.Compute(_historic.Doc, liveDoc), _historic.Doc, state.Document);
     }
 
-    private void FetchHistoric(string repoPath, string jsonRel, string reference)
+    private void FetchHistoric(string repoPath, string jsonRel, string reference, int generation)
     {
         var sha = GLoomRepository.ResolveCommit(repoPath, reference);
         CanonicalDocument? doc = null;
@@ -780,27 +790,34 @@ public sealed class CanvasDiffOverlay
             }
         }
 
-        if (!TryInvokeOnUi(() => OnHistoricFetched(repoPath, jsonRel, reference, sha, doc)))
+        if (!TryInvokeOnUi(() => OnHistoricFetched(generation, sha, doc, reference)))
             _fetchInFlight = false;
     }
 
-    private void OnHistoricFetched(
-        string repoPath, string jsonRel, string reference, string? sha, CanonicalDocument? doc)
+    private void OnHistoricFetched(int generation, string? sha, CanonicalDocument? doc, string reference)
     {
         _fetchInFlight = false;
 
-        // Drop stale results: the tracked file or the picked reference
-        // moved on while the fetch ran. The dirty flags are still set, so
-        // rescheduling recomputes against the new state.
-        var state = DocumentTracker.Instance.State;
-        var currentJsonRel = state.RepoPath is not null && state.CanonicalJsonFullPath is not null
-            ? Path.GetRelativePath(state.RepoPath, state.CanonicalJsonFullPath)
-            : null;
-        if (state.RepoPath != repoPath || currentJsonRel != jsonRel || _comparisonReference != reference)
+        // Drop stale results: any event that invalidated the historic side
+        // while the fetch ran (a commit moving HEAD, a file/repo switch, a
+        // reference change) bumped the generation. Accepting such a result
+        // would clear _historicDirty and pin the overlay to a pre-event
+        // baseline until the next tracker state change. The dirty flags are
+        // still set, so rescheduling recomputes against the new state.
+        if (generation != _historicGeneration)
         {
             ScheduleRecompute();
             return;
         }
+
+        var state = DocumentTracker.Instance.State;
+        if (state.RepoPath is null || state.CanonicalJsonFullPath is null)
+        {
+            SetDiff(null, null, null);
+            return;
+        }
+        var jsonRel = Path.GetRelativePath(state.RepoPath, state.CanonicalJsonFullPath);
+        var repoPath = state.RepoPath;
 
         if (sha is null || doc is null)
         {
