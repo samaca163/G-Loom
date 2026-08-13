@@ -797,7 +797,14 @@ public static class GLoomRepository
                     // Strict ping-pong: one request, one response. Writing all
                     // requests up front deadlocks once responses fill the pipe
                     // buffer while we are still blocked writing stdin.
-                    proc.StandardInput.Write(sha + ":" + rel + "\n");
+                    // On macOS git precomposes argv (core.precomposeunicode)
+                    // but NOT stdin, so NFD on-disk filenames must be
+                    // NFC-normalized here or every tree lookup answers
+                    // "missing" - argv-based ls-tree used to get this free.
+                    var requestPath = OperatingSystem.IsMacOS()
+                        ? rel.Normalize(System.Text.NormalizationForm.FormC)
+                        : rel;
+                    proc.StandardInput.Write(sha + ":" + requestPath + "\n");
                     proc.StandardInput.Flush();
                     var response = proc.StandardOutput.ReadLine();
                     if (response is null) return null;
