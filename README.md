@@ -36,7 +36,7 @@ Branches, commits, merges, push/pull, distributed collaboration — decades of b
 
 ## Status
 
-Phases 1–3 done: commit / log / restore, branches with system-aware UX, multi-file repo isolation, tags with per-tag metadata and toolchain pinning, and the on-canvas visual diff overlay (halos, ghosts, wire arrows, right-click restore, compare-against-any-commit). Phase 4 (team collaboration: remotes, push/pull, smart Sync) is in progress. Cross-platform (Windows + macOS Rhino 8). Free, MIT, open source.
+Phases 1–4 shipped (v0.2.1): commit / log / restore with a commit dialog, branches with system-aware UX, multi-file repo isolation, tags with per-tag metadata and toolchain pinning, the on-canvas visual diff overlay (halos, ghosts, wire arrows, right-click restore, compare-against-any-commit), and remotes/push/pull with smart Sync. Currently in Phase 5 (de-risk & harden) on the road to assisted merge and public launch — see `docs/STRATEGY.md` for the full direction. Cross-platform (Windows + macOS Rhino 8). Free, MIT, open source.
 
 ## Install (from a GitHub Release)
 
@@ -99,11 +99,12 @@ Restart Rhino, open Grasshopper. The G-Loom panel auto-opens on first canvas cre
 - **Phase 1 — Commit / log / restore foundation.** *(done)* Canonical JSON serializer over `GH_IO`; commit / log / restore via the system `git` CLI; Eto panel; auto-versioned commit messages; multi-file repo isolation; tab-switch sync; cross-platform deploy.
 - **Phase 2 — Tags + toolchain metadata.** *(done)* Lightweight tags for milestones (DD / CD / IFC, software releases, product cert dates). Per-tag metadata schema (submittal info, release notes, toolchain pins). Branch-base markers in history.
 - **Phase 3 — Visual diff & review.** *(done)* On-canvas diff overlay (add/remove/modify/move highlighted, per-kind ghosts, wire arrows, right-click restore), compare against any commit.
-- **Phase 4 — Team collaboration.** *(in progress)* Remotes (add/list/remove), push/pull/fetch, smart Sync, upstream tracking, cross-project library sharing.
-- **Phase 5 — Merge & conflict resolution.** Merge with on-canvas conflict UI (per-component "left / right / blend").
-- **Phase 6 — Scoped branches & promote/refresh.** Cut-point picker on the canvas; scope-snapshot internalization; promote (merge sub-system back into trunk); refresh (pull updated input from trunk into scope).
-- **Phase 7 — Heavy geometry & persistence.** LFS-style storage for internalized blobs and tag-time geometry caches; persistent value capture for sliders / panels / internalized data; perf for large definitions.
-- **Phase 8 — Audit, distribution, polish.** Per-tag submittal metadata UI, Yak distribution, signed/notarized macOS bundle, optional auto-commit-on-save, RiR-aware versioning.
+- **Phase 4 — Team collaboration.** *(shipped in v0.2.x; smoke-test pass pending)* Remotes (add/list/remove), push/pull/fetch, smart Sync, upstream tracking.
+- **Phase 5 — De-risk & harden.** *(current)* Grasshopper 2 verification (Rhino 9 Beta); a format-adapter seam so the canonical recipe schema, diff engine, and branch model are independent of the GH1 file format; GhJSON interop; test coverage for the pure logic.
+- **Phase 6 — Assisted merge.** Three-way, on-canvas assisted merge: both branches' changes vs the merge-base rendered with the existing diff overlay; non-conflicting changes apply automatically; conflicts resolve per-component (take left / take right) using the existing restore machinery.
+- **Phase 7 — Launch.** Yak package, food4rhino listing, demo material, public repository.
+- **Phase 8 — AI layer.** AI-written commit narratives; review-and-revert flows for agent-edited definitions (MCP); recipe provenance stamped into published model metadata (e.g., Speckle versions).
+- **Phase 9 — Element versioning & heavy geometry.** Structured, diffable element extracts (quantities & qualities as a queryable timeline) on git; per-element display geometry content-addressed via DVC; three-lane project layout via the Cimbra scaffolder. Scoped branches + promote/refresh follow post-launch.
 
 ## License
 
