@@ -15,7 +15,7 @@ namespace GLoom.Vcs;
 /// </summary>
 public static class GLoomRepository
 {
-    public sealed record CommitInfo(string Sha, string Author, DateTimeOffset When, string Message);
+    public sealed record CommitInfo(string Sha, string Author, DateTimeOffset When, string Message, string Body = "");
     public sealed record RepoStatus(string Branch, CommitInfo? LastCommit);
     public sealed record BranchInfo(string Name, bool IsCurrent);
     public sealed record ForkPoint(string ParentBranch, string ForkSha);
@@ -91,7 +91,9 @@ public static class GLoomRepository
         if (!IsRepo(repoRoot)) return Array.Empty<CommitInfo>();
         if (limit <= 0) limit = 10;
 
-        var fmt = $"%H{FieldSep}%an{FieldSep}%aI{FieldSep}%s{RecordSep}";
+        // %b (body) rides along so version labels can be resolved from the
+        // Gloom-Version: trailer that dialog-based commits carry there.
+        var fmt = $"%H{FieldSep}%an{FieldSep}%aI{FieldSep}%s{FieldSep}%b{RecordSep}";
         var args = new List<string> { "log", $"-n{limit}", $"--pretty=format:{fmt}" };
         if (repoRelativeFiles is not null)
         {
@@ -107,7 +109,8 @@ public static class GLoomRepository
             var parts = rec.Trim('\n', '\r').Split(FieldSep);
             if (parts.Length < 4) continue;
             DateTimeOffset.TryParse(parts[2], out var when);
-            list.Add(new CommitInfo(parts[0], parts[1], when, parts[3]));
+            var body = parts.Length >= 5 ? parts[4].Trim('\n', '\r') : "";
+            list.Add(new CommitInfo(parts[0], parts[1], when, parts[3], body));
         }
         return list;
     }
@@ -131,7 +134,7 @@ public static class GLoomRepository
 
         var args = new List<string>
         {
-            "log", "-1", $"--pretty=format:%H{FieldSep}%an{FieldSep}%aI{FieldSep}%s",
+            "log", "-1", $"--pretty=format:%H{FieldSep}%an{FieldSep}%aI{FieldSep}%s{FieldSep}%b",
         };
         if (repoRelativeFiles is not null)
         {
@@ -147,7 +150,8 @@ public static class GLoomRepository
             if (parts.Length >= 4)
             {
                 DateTimeOffset.TryParse(parts[2], out var when);
-                last = new CommitInfo(parts[0], parts[1], when, parts[3]);
+                var body = parts.Length >= 5 ? parts[4].Trim('\n', '\r') : "";
+                last = new CommitInfo(parts[0], parts[1], when, parts[3], body);
             }
         }
         return new RepoStatus(branchName, last);

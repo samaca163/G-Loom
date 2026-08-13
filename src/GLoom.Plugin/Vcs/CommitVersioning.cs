@@ -31,4 +31,14 @@ public static class CommitVersioning
             message, @"_V(\d{3,})\b");
         return match.Success ? "V" + match.Groups[1].Value : null;
     }
+
+    /// <summary>
+    /// Resolves the version label from a commit, searching both the subject
+    /// and the body. Dialog-based commits carry the version in a
+    /// <c>Gloom-Version:</c> body trailer (keeping subjects human-readable);
+    /// auto-versioned commits carry it in the subject. Scanning both keeps
+    /// every era of history readable.
+    /// </summary>
+    public static string? ExtractVersionLabel(GLoomRepository.CommitInfo c) =>
+        ExtractVersionLabel($"{c.Message}\n{c.Body}");
 }
