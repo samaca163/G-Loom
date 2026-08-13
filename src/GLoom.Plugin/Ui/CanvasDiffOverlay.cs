@@ -918,7 +918,10 @@ public sealed class CanvasDiffOverlay
             var showExtras = !s.HoverDetailsOnly || isHovered;
 
             // Cull on the union of live and (for moves) old bounds so a
-            // trail whose far end is on-screen still renders.
+            // trail whose far end is on-screen still renders. The vertical
+            // margin tracks the item's own height because slider and
+            // MD-slider ghosts mirror the live component's height below its
+            // bounds (a user-resized MD slider can be arbitrarily tall).
             var liveBounds = live.Attributes?.Bounds ?? RectangleF.Empty;
             if (!liveBounds.IsEmpty)
             {
@@ -930,7 +933,8 @@ public sealed class CanvasDiffOverlay
                     old.Offset(change.From.Pivot.X - livePivot.X, change.From.Pivot.Y - livePivot.Y);
                     cullRect = RectangleF.Union(cullRect, old);
                 }
-                if (!visible.IntersectsWith(RectangleF.Inflate(cullRect, 120f, 200f))) continue;
+                var vMargin = Math.Max(200f, liveBounds.Height + 60f);
+                if (!visible.IntersectsWith(RectangleF.Inflate(cullRect, 120f, vMargin))) continue;
             }
 
             if ((change.Kinds & ObjectChangeKind.Moved) != 0 && s.ShowMoved && showExtras)
@@ -994,11 +998,10 @@ public sealed class CanvasDiffOverlay
                 var isHovered = hoveredId == change.To.InstanceGuid;
                 if (s.HoverDetailsOnly && !isHovered) continue;
 
-                // Preview height is text-dependent; the tall margin keeps
-                // near-edge previews from popping.
-                var b = live.Attributes?.Bounds ?? RectangleF.Empty;
-                if (!b.IsEmpty && !visible.IntersectsWith(RectangleF.Inflate(b, 300f, 600f))) continue;
-
+                // Never culled: the preview box extends above the panel by
+                // the full wrapped height of the OLD text, which is
+                // unbounded - no fixed margin is safe, and changed panels
+                // are few.
                 PaintPanelHoverPreview(graphics, live, change.From);
             }
         }
