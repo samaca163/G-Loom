@@ -92,11 +92,14 @@ public sealed class GLoomPanel : Panel
         {
             _historyLimit = DefaultHistoryLimit;
             DocumentTracker.Instance.Refresh();
+            // The tracker only raises StateChanged on actual changes; request
+            // the re-render directly so Refresh always re-reads tags/remotes.
+            RequestRefresh();
         };
         _showMoreButton.Click += (_, _) =>
         {
             _historyLimit += HistoryIncrement;
-            Refresh();
+            RequestRefresh();
         };
         _branchButton.Click += (_, _) => _branchMenu?.Show(_branchButton);
         _remoteButton.Click += (_, _) => _remoteMenu?.Show(_remoteButton);
@@ -155,7 +158,7 @@ public sealed class GLoomPanel : Panel
                 Application.Instance.AsyncInvoke(() =>
                 {
                     UpdateOverlayRefLabel();
-                    Refresh();
+                    RequestRefresh();
                 });
             }
             catch { /* not yet attached to an Eto loop */ }
@@ -213,7 +216,7 @@ public sealed class GLoomPanel : Panel
         Content = root;
 
         DocumentTracker.Instance.StateChanged += OnTrackerChanged;
-        Refresh();
+        RequestRefresh();
     }
 
     // ---- helpers ------------------------------------------------------
@@ -304,13 +307,38 @@ public sealed class GLoomPanel : Panel
 
     private void OnTrackerChanged(object? sender, EventArgs e)
     {
-        try { Application.Instance.AsyncInvoke(Refresh); }
+        try { Application.Instance.AsyncInvoke(RequestRefresh); }
         catch { /* Eto not yet attached to a UI loop; ignore */ }
     }
 
     // ---- main render --------------------------------------------------
 
-    private void Refresh()
+    // Everything a refresh renders, produced by the background read phase.
+    private sealed record RefreshData(
+        string GhRel,
+        string JsonRel,
+        GLoomRepository.RepoStatus Status,
+        IReadOnlyList<GLoomRepository.BranchInfo> Branches,
+        IReadOnlyList<GLoomRepository.RemoteInfo> Remotes,
+        GLoomRepository.UpstreamInfo? Upstream,
+        GLoomRepository.AheadBehind Ab,
+        IReadOnlyList<GLoomRepository.CommitInfo> Commits,
+        int NextVersion,
+        IReadOnlyList<GLoomRepository.ForkPoint> Forks,
+        IReadOnlyList<GLoomRepository.TagInfo> Tags,
+        CanonicalDocument? CurrentDoc,
+        Exception? Error);
+
+    private int _refreshRunning;
+    private bool _refreshRerun;
+
+    /// <summary>
+    /// Kicks a panel refresh: quick idle/untracked states render synchronously;
+    /// otherwise all git reads run on a worker and only control mutation comes
+    /// back to the UI thread. Single-flight with a trailing-edge rerun so a
+    /// burst of state changes coalesces instead of queueing N full refreshes.
+    /// </summary>
+    private void RequestRefresh()
     {
         var s = DocumentTracker.Instance.State;
 
@@ -322,65 +350,145 @@ public sealed class GLoomPanel : Panel
             return;
         }
 
+        if (System.Threading.Interlocked.CompareExchange(ref _refreshRunning, 1, 0) != 0)
+        {
+            _refreshRerun = true;
+            return;
+        }
+
+        var limit = _historyLimit;
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            var d = ReadRepoData(s, limit);
+            try
+            {
+                Application.Instance.AsyncInvoke(() =>
+                {
+                    try { ApplyRefresh(s, d); }
+                    catch (Exception ex)
+                    {
+                        RhinoApp.WriteLine($"[G-Loom] Panel render failed: {ex.Message}");
+                    }
+                    finally
+                    {
+                        System.Threading.Interlocked.Exchange(ref _refreshRunning, 0);
+                        if (_refreshRerun) { _refreshRerun = false; RequestRefresh(); }
+                    }
+                });
+            }
+            catch
+            {
+                System.Threading.Interlocked.Exchange(ref _refreshRunning, 0);
+            }
+        });
+    }
+
+    /// <summary>
+    /// Background read phase: git + filesystem only. Must never touch
+    /// s.Document - GH documents are UI-thread-only. Each git fact is
+    /// fetched exactly once and threaded through to the render.
+    /// </summary>
+    private static RefreshData ReadRepoData(TrackedState s, int historyLimit)
+    {
         try
         {
-            _filePathLabel.Text = s.FilePath;
-            _repoLabel.Text = s.RepoPath;
-
-            var ghBase = Path.GetFileNameWithoutExtension(s.FilePath);
-            var ghRel = Path.GetRelativePath(s.RepoPath, s.FilePath);
-            var jsonRel = Path.GetRelativePath(s.RepoPath, s.CanonicalJsonFullPath!);
+            var repo = s.RepoPath!;
+            var ghRel = Path.GetRelativePath(repo, s.FilePath!);
+            var jsonRel = Path.GetRelativePath(repo, s.CanonicalJsonFullPath!);
             var fileScope = new[] { ghRel, jsonRel };
 
             // Branch is repo-wide; "last commit" is filtered to this file's pair
             // so multi-file repos don't bleed another file's commit into the panel.
-            var status = GLoomRepository.GetStatus(s.RepoPath, fileScope);
-            var branches = GLoomRepository.GetBranches(s.RepoPath);
-            UpdateBranchControl(s, branches, status.Branch);
+            var status = GLoomRepository.GetStatus(repo, fileScope);
+            var branches = GLoomRepository.GetBranches(repo);
+            var remotes = GLoomRepository.GetRemotes(repo);
+            var upstream = GLoomRepository.GetUpstream(repo, status.Branch);
+            var ab = GLoomRepository.GetAheadBehind(repo, status.Branch, upstream);
 
-            var remotes = GLoomRepository.GetRemotes(s.RepoPath);
-            var upstream = GLoomRepository.GetUpstream(s.RepoPath, status.Branch);
-            var ab = GLoomRepository.GetAheadBehind(s.RepoPath, status.Branch);
-            UpdateRemoteControl(s, remotes, upstream, branches, status.Branch);
-            UpdateSyncControl(remotes, upstream, ab, status.Branch);
-            _lastCommitLabel.Text = status.LastCommit is null
-                ? "(no commits yet)"
-                : $"{status.LastCommit.Sha[..7]}  {status.LastCommit.Message}";
+            // One log window serves both the current-version lookup and the
+            // history list (the old code fetched two overlapping windows).
+            var commits = GLoomRepository.Log(repo, Math.Max(historyLimit, 50), fileScope);
+            var nextV = CommitVersioning.NextVersion(repo, ghRel, jsonRel);
+            var forks = GLoomRepository.GetForkPoints(repo, status.Branch, branches);
+            var tags = GLoomRepository.GetTags(repo);
 
-            // Resolve "current" SHA: explicit restore wins, else this-file's HEAD.
-            var currentSha = s.CurrentRestoredSha ?? status.LastCommit?.Sha;
-            _currentVersionLabel.Text = ResolveCurrentVersionLabel(s, currentSha, fileScope);
+            // Current working tree's canonical JSON, parsed ONCE per refresh -
+            // every row's diff has the same right-hand side. Historic JSON is
+            // read lazily when each row's drawer is first expanded.
+            CanonicalDocument? currentDoc = null;
+            try
+            {
+                if (s.CanonicalJsonFullPath is not null && File.Exists(s.CanonicalJsonFullPath))
+                    currentDoc = CanonicalJson.TryParse(File.ReadAllText(s.CanonicalJsonFullPath));
+            }
+            catch { /* leave null; diffs render as unavailable */ }
 
-            var nextV = CommitVersioning.NextVersion(s.RepoPath, ghRel, jsonRel);
-            _nextVersionLabel.Text = CommitVersioning.FormatMessage(ghBase, nextV);
-
-            _dirtyLabel.Text = s.HasUnsavedChanges
-                ? "unsaved changes (commit will use live state, .gh on disk may be stale)"
-                : "clean";
-            _commitButton.Enabled = true;
-
-            RefreshHistory(s, currentSha, fileScope, status.Branch);
+            return new RefreshData(
+                ghRel, jsonRel, status, branches, remotes, upstream, ab,
+                commits, nextV, forks, tags, currentDoc, null);
         }
         catch (Exception ex)
+        {
+            return new RefreshData(
+                string.Empty, string.Empty, new GLoomRepository.RepoStatus("(error)", null),
+                Array.Empty<GLoomRepository.BranchInfo>(),
+                Array.Empty<GLoomRepository.RemoteInfo>(), null, default,
+                Array.Empty<GLoomRepository.CommitInfo>(), 0,
+                Array.Empty<GLoomRepository.ForkPoint>(),
+                Array.Empty<GLoomRepository.TagInfo>(), null, ex);
+        }
+    }
+
+    private void ApplyRefresh(TrackedState s, RefreshData d)
+    {
+        // The tracker may have moved to another file while the read ran; any
+        // such change queued a rerun via the trailing-edge flag, so skipping
+        // the stale render is safe and prevents cross-file flicker.
+        var cur = DocumentTracker.Instance.State;
+        if (!ReferenceEquals(cur.Document, s.Document) || cur.FilePath != s.FilePath) return;
+
+        if (d.Error is not null)
         {
             _commitButton.Enabled = false;
             DisableBranchControl();
             DisableRemoteControls();
-            _lastCommitLabel.Text = $"(error: {ex.Message})";
+            _lastCommitLabel.Text = $"(error: {d.Error.Message})";
             _historyContainer.Items.Clear();
             _showMoreButton.Visible = false;
+            return;
         }
+
+        _filePathLabel.Text = s.FilePath;
+        _repoLabel.Text = s.RepoPath;
+
+        var ghBase = Path.GetFileNameWithoutExtension(s.FilePath!);
+        UpdateBranchControl(s, d.Branches, d.Status.Branch);
+        UpdateRemoteControl(s, d.Remotes, d.Upstream, d.Branches, d.Status.Branch);
+        UpdateSyncControl(d.Remotes, d.Upstream, d.Ab, d.Status.Branch);
+        _lastCommitLabel.Text = d.Status.LastCommit is null
+            ? "(no commits yet)"
+            : $"{d.Status.LastCommit.Sha[..7]}  {d.Status.LastCommit.Message}";
+
+        // Resolve "current" SHA: explicit restore wins, else this-file's HEAD.
+        var currentSha = s.CurrentRestoredSha ?? d.Status.LastCommit?.Sha;
+        _currentVersionLabel.Text = ResolveCurrentVersionLabel(currentSha, d.Commits);
+
+        _nextVersionLabel.Text = CommitVersioning.FormatMessage(ghBase, d.NextVersion);
+
+        _dirtyLabel.Text = s.HasUnsavedChanges
+            ? "unsaved changes (commit will use live state, .gh on disk may be stale)"
+            : "clean";
+        _commitButton.Enabled = true;
+
+        RefreshHistory(s, currentSha, d);
     }
 
-    private string ResolveCurrentVersionLabel(TrackedState s, string? currentSha, IReadOnlyList<string> fileScope)
+    private static string ResolveCurrentVersionLabel(
+        string? currentSha, IReadOnlyList<GLoomRepository.CommitInfo> commits)
     {
         if (currentSha is null) return "(not committed yet)";
 
-        // Scan a window of this-file commits and look for the SHA. Cheaper than
-        // a separate `git log -1 <sha>` round-trip and good enough since the
-        // current commit is by definition recent in *this file's* history.
-        var recent = GLoomRepository.Log(s.RepoPath!, Math.Max(_historyLimit, 50), fileScope);
-        foreach (var c in recent)
+        foreach (var c in commits)
             if (c.Sha == currentSha)
                 return CommitVersioning.ExtractVersionLabel(c.Message)
                        ?? c.Message;
@@ -388,17 +496,16 @@ public sealed class GLoomPanel : Panel
         return currentSha[..7];
     }
 
-    private void RefreshHistory(TrackedState s, string? currentSha, IReadOnlyList<string> fileScope, string branchName)
+    private void RefreshHistory(TrackedState s, string? currentSha, RefreshData d)
     {
         if (s.RepoPath is null || s.FilePath is null) { _historyContainer.Items.Clear(); _showMoreButton.Visible = false; return; }
 
-        var commits = GLoomRepository.Log(s.RepoPath, _historyLimit, fileScope);
+        var commits = d.Commits.Take(_historyLimit).ToList();
 
         // Fork-point markers: where the current branch diverged from
         // (a) the default branch and (b) the closest other local branch.
-        var forks = GLoomRepository.GetForkPoints(s.RepoPath, branchName);
         var forksBySha = new Dictionary<string, List<string>>(StringComparer.Ordinal);
-        foreach (var fp in forks)
+        foreach (var fp in d.Forks)
         {
             if (!forksBySha.TryGetValue(fp.ForkSha, out var list))
             {
@@ -410,9 +517,8 @@ public sealed class GLoomPanel : Panel
 
         // Tags are repo-wide; we group by SHA and only render in drawers
         // for commits the file-scoped history actually surfaces.
-        var tags = GLoomRepository.GetTags(s.RepoPath);
         var tagsBySha = new Dictionary<string, List<GLoomRepository.TagInfo>>(StringComparer.Ordinal);
-        foreach (var t in tags)
+        foreach (var t in d.Tags)
         {
             if (!tagsBySha.TryGetValue(t.Sha, out var list))
             {
@@ -424,21 +530,8 @@ public sealed class GLoomPanel : Panel
         foreach (var list in tagsBySha.Values)
             list.Sort((a, b) => StringComparer.Ordinal.Compare(a.Name, b.Name));
 
-        // Read the current working tree's canonical JSON ONCE per refresh -
-        // every row's diff has the same right-hand side (current state),
-        // and parsing N times wastes work. Historic JSON is read lazily
-        // when each row's drawer is first expanded.
-        CanonicalDocument? currentDoc = null;
-        try
-        {
-            if (s.CanonicalJsonFullPath is not null && File.Exists(s.CanonicalJsonFullPath))
-                currentDoc = CanonicalJson.TryParse(File.ReadAllText(s.CanonicalJsonFullPath));
-        }
-        catch { /* leave currentDoc null; diffs render as unavailable */ }
-
-        var jsonRel = s.CanonicalJsonFullPath is not null
-            ? Path.GetRelativePath(s.RepoPath, s.CanonicalJsonFullPath)
-            : null;
+        var currentDoc = d.CurrentDoc;
+        var jsonRel = d.JsonRel;
 
         var currentRef = CanvasDiffOverlay.Instance.ComparisonReference;
         var visibleShas = new HashSet<string>(StringComparer.Ordinal);
@@ -453,7 +546,7 @@ public sealed class GLoomPanel : Panel
             var sha = c.Sha;
             var repoPath = s.RepoPath;
 
-            Func<DocumentDiff?> diffProvider = isCurrent || currentDoc is null || jsonRel is null
+            Func<DocumentDiff?> diffProvider = isCurrent || currentDoc is null || string.IsNullOrEmpty(jsonRel)
                 ? () => null
                 : () =>
                 {
@@ -829,7 +922,7 @@ public sealed class GLoomPanel : Panel
             // fire if working-tree blobs happen to match the prior commit
             // (e.g. branching off the current HEAD). Re-render directly to
             // make sure the dropdown reflects the new branch.
-            Refresh();
+            RequestRefresh();
         }
         catch (Exception ex)
         {
@@ -854,7 +947,7 @@ public sealed class GLoomPanel : Panel
             GLoomRepository.CreateBranch(s.RepoPath, trimmed, checkout: true);
             RhinoApp.WriteLine($"[G-Loom] Created and switched to branch '{trimmed}'.");
             DocumentTracker.Instance.Refresh();
-            Refresh();
+            RequestRefresh();
         }
         catch (Exception ex)
         {
@@ -880,7 +973,7 @@ public sealed class GLoomPanel : Panel
             GLoomRepository.RenameBranch(s.RepoPath, oldName, trimmed);
             RhinoApp.WriteLine($"[G-Loom] Renamed branch '{oldName}' -> '{trimmed}'.");
             DocumentTracker.Instance.Refresh();
-            Refresh();
+            RequestRefresh();
         }
         catch (Exception ex)
         {
@@ -904,7 +997,7 @@ public sealed class GLoomPanel : Panel
             GLoomRepository.DeleteBranch(s.RepoPath, targetBranch, force: false);
             RhinoApp.WriteLine($"[G-Loom] Deleted branch '{targetBranch}'.");
             DocumentTracker.Instance.Refresh();
-            Refresh();
+            RequestRefresh();
         }
         catch (Exception ex)
         {
@@ -922,7 +1015,7 @@ public sealed class GLoomPanel : Panel
                 GLoomRepository.DeleteBranch(s.RepoPath, targetBranch, force: true);
                 RhinoApp.WriteLine($"[G-Loom] Force-deleted branch '{targetBranch}'.");
                 DocumentTracker.Instance.Refresh();
-                Refresh();
+                RequestRefresh();
             }
             catch (Exception forceEx)
             {
@@ -956,7 +1049,7 @@ public sealed class GLoomPanel : Panel
             GLoomRepository.AddRemote(s.RepoPath, trimmedName, trimmedUrl);
             RhinoApp.WriteLine($"[G-Loom] Added remote '{trimmedName}' -> {trimmedUrl}");
             DocumentTracker.Instance.Refresh();
-            Refresh();
+            RequestRefresh();
         }
         catch (Exception ex)
         {
@@ -981,7 +1074,7 @@ public sealed class GLoomPanel : Panel
             GLoomRepository.RemoveRemote(s.RepoPath, remoteName);
             RhinoApp.WriteLine($"[G-Loom] Removed remote '{remoteName}'.");
             DocumentTracker.Instance.Refresh();
-            Refresh();
+            RequestRefresh();
         }
         catch (Exception ex)
         {
@@ -1008,7 +1101,7 @@ public sealed class GLoomPanel : Panel
             GLoomRepository.SetRemoteUrl(s.RepoPath, remoteName, trimmed);
             RhinoApp.WriteLine($"[G-Loom] Changed '{remoteName}' URL -> {trimmed}");
             DocumentTracker.Instance.Refresh();
-            Refresh();
+            RequestRefresh();
         }
         catch (Exception ex)
         {
@@ -1027,7 +1120,7 @@ public sealed class GLoomPanel : Panel
             GLoomRepository.SetUpstream(s.RepoPath, branch, remoteName, remoteBranch);
             RhinoApp.WriteLine($"[G-Loom] Upstream for '{branch}' -> {remoteName}/{remoteBranch}");
             DocumentTracker.Instance.Refresh();
-            Refresh();
+            RequestRefresh();
         }
         catch (Exception ex)
         {
@@ -1153,14 +1246,14 @@ public sealed class GLoomPanel : Panel
     private void FinishSync()
     {
         DocumentTracker.Instance.Refresh();
-        Refresh();
+        RequestRefresh();
     }
 
     private void ReportSyncFailure(string stage, string message)
     {
         MessageBox.Show($"{stage} failed:\n\n{message}",
             "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
-        Refresh();
+        RequestRefresh();
     }
 
     // ---- tag handlers ------------------------------------------------
@@ -1198,7 +1291,7 @@ public sealed class GLoomPanel : Panel
                 taggerName: "iSamacA", taggerEmail: "samaca163@gmail.com");
             RhinoApp.WriteLine($"[G-Loom] Tagged {sha7} as '{result.Name}'.");
             DocumentTracker.Instance.Refresh();
-            Refresh();
+            RequestRefresh();
         }
         catch (Exception ex)
         {
@@ -1223,7 +1316,7 @@ public sealed class GLoomPanel : Panel
             GLoomRepository.DeleteTag(s.RepoPath, tagName);
             RhinoApp.WriteLine($"[G-Loom] Deleted tag '{tagName}'.");
             DocumentTracker.Instance.Refresh();
-            Refresh();
+            RequestRefresh();
         }
         catch (Exception ex)
         {

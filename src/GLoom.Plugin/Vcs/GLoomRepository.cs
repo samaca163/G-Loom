@@ -314,13 +314,16 @@ public static class GLoomRepository
     /// and one to the closest other branch (most recent merge-base). The two
     /// are deduplicated when they resolve to the same commit.
     /// </summary>
-    public static IReadOnlyList<ForkPoint> GetForkPoints(string repoRoot, string currentBranchName)
+    public static IReadOnlyList<ForkPoint> GetForkPoints(
+        string repoRoot,
+        string currentBranchName,
+        IReadOnlyList<BranchInfo>? branches = null)
     {
         if (!IsRepo(repoRoot)) return Array.Empty<ForkPoint>();
         if (string.IsNullOrEmpty(currentBranchName) || currentBranchName == "(detached)")
             return Array.Empty<ForkPoint>();
 
-        var branches = GetBranches(repoRoot);
+        branches ??= GetBranches(repoRoot);
         var others = new List<string>();
         foreach (var b in branches)
             if (b.Name != currentBranchName) others.Add(b.Name);
@@ -563,9 +566,18 @@ public static class GLoomRepository
     {
         if (!IsRepo(repoRoot) || string.IsNullOrEmpty(branch)) return default;
         if (branch == "(detached)") return default;
+        return GetAheadBehind(repoRoot, branch, GetUpstream(repoRoot, branch));
+    }
 
-        var upstream = GetUpstream(repoRoot, branch);
+    /// <summary>
+    /// Overload for callers that already resolved the upstream - avoids the
+    /// duplicate GetUpstream spawn the panel used to pay on every refresh.
+    /// </summary>
+    public static AheadBehind GetAheadBehind(string repoRoot, string branch, UpstreamInfo? upstream)
+    {
         if (upstream is null) return default;
+        if (!IsRepo(repoRoot) || string.IsNullOrEmpty(branch)) return default;
+        if (branch == "(detached)") return default;
 
         var spec = $"{upstream.Remote}/{upstream.RemoteBranch}...{branch}";
         var result = Run(repoRoot, "rev-list", "--left-right", "--count", spec);
