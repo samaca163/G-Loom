@@ -30,10 +30,15 @@ namespace GLoom.Ui;
 /// "from" is always HEAD's .gloom.json and the "to" is the live
 /// document state via DocumentSerializer.
 ///
-/// Throttled by a 250ms minimum recompute interval so a flurry of
-/// SolutionEnd events during slider drag doesn't pin the CPU. The
-/// CanvasPostPaintObjects event fires every paint cycle anyway, so
-/// the cached diff renders for free between recomputes.
+/// The paint handler is strictly read-only against the cached diff:
+/// recompute is event-driven (document SolutionEnd / ObjectsAdded /
+/// ObjectsDeleted / UndoStateChanged, tracker StateChanged, reference
+/// changes), debounced to a 250ms floor, with the historic side parsed
+/// once per resolved commit SHA and fetched off the UI thread. Pan/zoom
+/// frames therefore never run git, JSON parsing or serialization -
+/// that inline work was the canvas stutter the old paint-clock scheme
+/// caused. A failed historic fetch latches off (no timed retry) until
+/// the next state or reference change.
 /// </summary>
 public sealed class CanvasDiffOverlay
 {
@@ -46,6 +51,8 @@ public sealed class CanvasDiffOverlay
     private static readonly Color MovedColor    = Color.FromArgb(220,  60, 130, 220);
     private static readonly Color RemovedColor  = Color.FromArgb(220, 220,  40,  40);
 
+    // Minimum interval between recomputes: a slider-drag flurry of
+    // SolutionEnd events coalesces into one trailing recompute per window.
     private static readonly TimeSpan StaleAfter = TimeSpan.FromMilliseconds(250);
 
     public bool Enabled { get; private set; } = true;
@@ -77,10 +84,12 @@ public sealed class CanvasDiffOverlay
         if (string.IsNullOrWhiteSpace(reference)) reference = "HEAD";
         if (_comparisonReference == reference) return;
         _comparisonReference = reference;
-        _lastComputed = DateTime.MinValue;
-        _cachedDiff = null;
+        _historicDirty = true;
+        _historicUnavailable = false;
+        _liveDirty = true;
+        SetDiff(null, null, null);
         ComparisonReferenceChanged?.Invoke(this, EventArgs.Empty);
-        Instances.ActiveCanvas?.Refresh();
+        ScheduleRecompute();
     }
 
     public event EventHandler? EnabledChanged;
@@ -89,12 +98,32 @@ public sealed class CanvasDiffOverlay
 
     private DocumentDiff? _cachedDiff;
     private CanonicalDocument? _cachedFromDoc;
+    private GH_Document? _diffDoc;
     private HashSet<string> _hoverableIds = new(StringComparer.Ordinal);
     private string? _hoveredId;
-    private DateTime _lastComputed = DateTime.MinValue;
     private bool _initialized;
     private string? _lastTrackedFilePath;
     private string? _lastTrackedRepoPath;
+
+    // Recompute pipeline state. All flags are UI-thread-only; the historic
+    // cache is concurrent because the fetch stage populates it off-thread.
+    private bool _liveDirty = true;
+    private bool _historicDirty = true;
+    private bool _historicUnavailable;
+    private bool _fetchInFlight;
+    private bool _recomputePending;
+    private DateTime _lastRecomputeUtc = DateTime.MinValue;
+    private HistoricSnapshot? _historic;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, CanonicalDocument>
+        _historicCache = new(StringComparer.Ordinal);
+
+    private sealed record HistoricSnapshot(string RepoPath, string JsonRel, string Sha, CanonicalDocument Doc);
+
+    private GH_Document? _hookedDoc;
+    private GH_Document.SolutionEndEventHandler? _onSolutionEnd;
+    private GH_Document.ObjectsAddedEventHandler? _onObjectsAdded;
+    private GH_Document.ObjectsDeletedEventHandler? _onObjectsDeleted;
+    private GH_Document.UndoStateChangedEventHandler? _onUndoStateChanged;
 
     // Painted ghost regions, refreshed every Paint cycle. Right-click
     // hit-test consults this to decide whether to surface the restore
@@ -129,10 +158,10 @@ public sealed class CanvasDiffOverlay
         if (Instances.ActiveCanvas is { } ac) HookCanvas(ac);
 
         // Any tracker state change invalidates the diff cache (the live
-        // doc may have been edited). The comparison reference, however,
-        // only snaps back to HEAD when the FILE or REPO actually
-        // changed - so an in-place edit (e.g. restoring a component)
-        // doesn't silently drop the user's picked reference.
+        // doc may have been edited, HEAD may have moved). The comparison
+        // reference, however, only snaps back to HEAD when the FILE or
+        // REPO actually changed - so an in-place edit (e.g. restoring a
+        // component) doesn't silently drop the user's picked reference.
         DocumentTracker.Instance.StateChanged += (_, _) =>
         {
             var state = DocumentTracker.Instance.State;
@@ -141,8 +170,16 @@ public sealed class CanvasDiffOverlay
             _lastTrackedFilePath = state.FilePath;
             _lastTrackedRepoPath = state.RepoPath;
 
-            _lastComputed = DateTime.MinValue;
-            _cachedDiff = null;
+            RehookDocumentEvents(state.Document);
+
+            _liveDirty = true;
+            _historicDirty = true;
+            _historicUnavailable = false;
+            if (fileOrRepoChanged)
+            {
+                _historicCache.Clear();
+                SetDiff(null, null, null);
+            }
 
             if (fileOrRepoChanged && _comparisonReference != "HEAD")
             {
@@ -150,17 +187,61 @@ public sealed class CanvasDiffOverlay
                 ComparisonReferenceChanged?.Invoke(this, EventArgs.Empty);
             }
 
-            if (Enabled) Instances.ActiveCanvas?.Refresh();
+            if (Enabled)
+            {
+                Instances.ActiveCanvas?.Invalidate();
+                ScheduleRecompute();
+            }
         };
+
+        RehookDocumentEvents(DocumentTracker.Instance.State.Document);
+        ScheduleRecompute();
+    }
+
+    private void RehookDocumentEvents(GH_Document? doc)
+    {
+        if (ReferenceEquals(_hookedDoc, doc)) return;
+        if (_hookedDoc is not null)
+        {
+            _hookedDoc.SolutionEnd -= _onSolutionEnd;
+            _hookedDoc.ObjectsAdded -= _onObjectsAdded;
+            _hookedDoc.ObjectsDeleted -= _onObjectsDeleted;
+            _hookedDoc.UndoStateChanged -= _onUndoStateChanged;
+        }
+        _hookedDoc = doc;
+        if (doc is null) return;
+
+        // UndoStateChanged is the move/rename signal: drag-moves record an
+        // undo event without solving, so SolutionEnd alone would miss them.
+        _onSolutionEnd ??= (_, _) => MarkLiveDirty();
+        _onObjectsAdded ??= (_, _) => MarkLiveDirty();
+        _onObjectsDeleted ??= (_, _) => MarkLiveDirty();
+        _onUndoStateChanged ??= (_, _) => MarkLiveDirty();
+        doc.SolutionEnd += _onSolutionEnd;
+        doc.ObjectsAdded += _onObjectsAdded;
+        doc.ObjectsDeleted += _onObjectsDeleted;
+        doc.UndoStateChanged += _onUndoStateChanged;
+    }
+
+    private void MarkLiveDirty()
+    {
+        _liveDirty = true;
+        ScheduleRecompute();
     }
 
     public void SetEnabled(bool enabled)
     {
         if (Enabled == enabled) return;
         Enabled = enabled;
-        _lastComputed = DateTime.MinValue;
+        if (enabled)
+        {
+            _liveDirty = true;
+            _historicDirty = true;
+            _historicUnavailable = false;
+            ScheduleRecompute();
+        }
         EnabledChanged?.Invoke(this, EventArgs.Empty);
-        Instances.ActiveCanvas?.Refresh();
+        Instances.ActiveCanvas?.Invalidate();
         RhinoApp.WriteLine($"[G-Loom] Diff overlay {(enabled ? "on" : "off")}.");
     }
 
@@ -337,8 +418,8 @@ public sealed class CanvasDiffOverlay
                     break;
             }
             doc.NewSolution(false);
-            _lastComputed = DateTime.MinValue;
-            Instances.ActiveCanvas?.Refresh();
+            MarkLiveDirty();
+            Instances.ActiveCanvas?.Invalidate();
         }
         catch (Exception ex)
         {
@@ -530,16 +611,13 @@ public sealed class CanvasDiffOverlay
     {
         if (!Enabled) return;
 
-        var now = DateTime.UtcNow;
-        if (now - _lastComputed > StaleAfter)
-        {
-            _cachedDiff = ComputeLiveDiff();
-            _lastComputed = now;
-            RebuildHoverableIndex();
-        }
-
+        // Strictly read-only: the recompute pipeline runs off the paint
+        // path entirely. The doc-identity guard prevents painting one
+        // document's overlay onto another canvas between a tab switch
+        // and the next recompute.
         var diff = _cachedDiff;
         if (diff is null || diff.IsEmpty) return;
+        if (!ReferenceEquals(_diffDoc, canvas.Document)) return;
 
         try
         {
@@ -564,38 +642,172 @@ public sealed class CanvasDiffOverlay
         }
     }
 
-    private DocumentDiff? ComputeLiveDiff()
+    // ---- recompute pipeline ------------------------------------------
+    //
+    // Stage A (background): resolve the comparison reference to a commit
+    // SHA, then fetch + parse the historic .gloom.json - cached per SHA,
+    // so steady-state editing never spawns git at all.
+    // Stage B (UI thread): serialize the live document (GH objects are
+    // UI-thread-only), diff, swap the cache, invalidate the canvas.
+    // Scheduling is event-driven with a 250ms floor; there is no timer
+    // and no polling - a clean, idle document costs nothing.
+
+    private void ScheduleRecompute()
     {
+        if (!Enabled || _recomputePending) return;
+        _recomputePending = true;
+
+        var wait = StaleAfter - (DateTime.UtcNow - _lastRecomputeUtc);
+        if (wait <= TimeSpan.Zero)
+        {
+            if (!TryInvokeOnUi(RunRecompute)) _recomputePending = false;
+        }
+        else
+        {
+            System.Threading.Tasks.Task.Delay(wait).ContinueWith(_ =>
+            {
+                if (!TryInvokeOnUi(RunRecompute)) _recomputePending = false;
+            });
+        }
+    }
+
+    private static bool TryInvokeOnUi(Action action)
+    {
+        try
+        {
+            Eto.Forms.Application.Instance.AsyncInvoke(action);
+            return true;
+        }
+        catch
+        {
+            // Eto not attached yet (very early load); the next dirty event
+            // reschedules.
+            return false;
+        }
+    }
+
+    private void RunRecompute()
+    {
+        _recomputePending = false;
+        if (!Enabled) return;
+
         var state = DocumentTracker.Instance.State;
         if (state.Document is null
             || state.RepoPath is null
             || state.FilePath is null
             || state.CanonicalJsonFullPath is null)
         {
-            _cachedFromDoc = null;
-            return null;
+            SetDiff(null, null, null);
+            return;
         }
 
         var jsonRel = Path.GetRelativePath(state.RepoPath, state.CanonicalJsonFullPath);
-        var historicJson = GLoomRepository.ReadFileAtCommit(state.RepoPath, _comparisonReference, jsonRel);
-        var headDoc = CanonicalJson.TryParse(historicJson);
-        if (headDoc is null) { _cachedFromDoc = null; return null; }
+
+        if (_historicDirty || _historic is null
+            || _historic.RepoPath != state.RepoPath
+            || _historic.JsonRel != jsonRel)
+        {
+            if (_historicUnavailable) return;
+            if (_fetchInFlight) return;
+
+            _fetchInFlight = true;
+            var repo = state.RepoPath;
+            var reference = _comparisonReference;
+            System.Threading.Tasks.Task.Run(() => FetchHistoric(repo, jsonRel, reference));
+            return;
+        }
+
+        if (!_liveDirty) return;
 
         CanonicalDocument liveDoc;
         try
         {
             liveDoc = DocumentSerializer.Serialize(state.Document);
         }
-        catch
+        catch (Exception ex)
         {
-            _cachedFromDoc = null;
-            return null;
+            _liveDirty = false;
+            RhinoApp.WriteLine($"[G-Loom] Overlay serialize failed: {ex.Message}");
+            return;
         }
 
-        // Stash the from-doc so paint can find downstream consumers of
-        // deleted components and visualize the missing output wires.
-        _cachedFromDoc = headDoc;
-        return DocumentDiff.Compute(headDoc, liveDoc);
+        _liveDirty = false;
+        _lastRecomputeUtc = DateTime.UtcNow;
+        SetDiff(DocumentDiff.Compute(_historic.Doc, liveDoc), _historic.Doc, state.Document);
+    }
+
+    private void FetchHistoric(string repoPath, string jsonRel, string reference)
+    {
+        var sha = GLoomRepository.ResolveCommit(repoPath, reference);
+        CanonicalDocument? doc = null;
+        if (sha is not null)
+        {
+            var key = repoPath + "|" + jsonRel + "|" + sha;
+            if (!_historicCache.TryGetValue(key, out doc))
+            {
+                var json = GLoomRepository.ReadFileAtCommit(repoPath, sha, jsonRel);
+                doc = CanonicalJson.TryParse(json);
+                if (doc is not null)
+                {
+                    // Content-addressed by SHA, so entries never go stale;
+                    // the bound only guards against unbounded growth from
+                    // many reference-compare picks in one session.
+                    if (_historicCache.Count > 4) _historicCache.Clear();
+                    _historicCache[key] = doc;
+                }
+            }
+        }
+
+        if (!TryInvokeOnUi(() => OnHistoricFetched(repoPath, jsonRel, reference, sha, doc)))
+            _fetchInFlight = false;
+    }
+
+    private void OnHistoricFetched(
+        string repoPath, string jsonRel, string reference, string? sha, CanonicalDocument? doc)
+    {
+        _fetchInFlight = false;
+
+        // Drop stale results: the tracked file or the picked reference
+        // moved on while the fetch ran. The dirty flags are still set, so
+        // rescheduling recomputes against the new state.
+        var state = DocumentTracker.Instance.State;
+        var currentJsonRel = state.RepoPath is not null && state.CanonicalJsonFullPath is not null
+            ? Path.GetRelativePath(state.RepoPath, state.CanonicalJsonFullPath)
+            : null;
+        if (state.RepoPath != repoPath || currentJsonRel != jsonRel || _comparisonReference != reference)
+        {
+            ScheduleRecompute();
+            return;
+        }
+
+        if (sha is null || doc is null)
+        {
+            // Latch OFF instead of retrying on a clock: a repo whose
+            // .gloom.json was never committed used to re-spawn git every
+            // 250ms forever. Only a state change, a reference change or a
+            // re-enable resets the latch.
+            _historicUnavailable = true;
+            _historic = null;
+            SetDiff(null, null, null);
+            RhinoApp.WriteLine($"[G-Loom] Overlay: no comparison data at {reference}.");
+            return;
+        }
+
+        _historic = new HistoricSnapshot(repoPath, jsonRel, sha, doc);
+        _historicDirty = false;
+        // The baseline changed, so the live side must re-diff against it
+        // even if no canvas edit happened since the last recompute.
+        _liveDirty = true;
+        RunRecompute();
+    }
+
+    private void SetDiff(DocumentDiff? diff, CanonicalDocument? fromDoc, GH_Document? diffDoc)
+    {
+        _cachedDiff = diff;
+        _cachedFromDoc = fromDoc;
+        _diffDoc = diffDoc;
+        RebuildHoverableIndex();
+        Instances.ActiveCanvas?.Invalidate();
     }
 
     private static void Paint(GH_Canvas canvas, DocumentDiff diff, CanvasDiffOverlay s, string? hoveredId)

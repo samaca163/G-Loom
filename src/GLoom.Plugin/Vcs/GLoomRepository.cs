@@ -835,6 +835,21 @@ public static class GLoomRepository
 
 
     /// <summary>
+    /// Resolves any commit-ish reference (HEAD, a branch, a tag, an
+    /// abbreviated SHA) to its full commit SHA, or null when the reference
+    /// doesn't resolve. Lets callers cache content by immutable SHA instead
+    /// of re-reading a moving reference.
+    /// </summary>
+    public static string? ResolveCommit(string repoRoot, string reference)
+    {
+        if (!IsRepo(repoRoot) || string.IsNullOrWhiteSpace(reference)) return null;
+        var result = Run(repoRoot, "rev-parse", "--verify", "--quiet", reference + "^{commit}");
+        if (result.ExitCode != 0) return null;
+        var sha = result.StdOut.Trim();
+        return string.IsNullOrEmpty(sha) ? null : sha;
+    }
+
+    /// <summary>
     /// Reads the contents of a file as it existed at <paramref name="commitSha"/>
     /// via `git show &lt;sha&gt;:&lt;path&gt;`. Returns null when git fails (file
     /// didn't exist at that commit, repo not initialised, bad path, etc.) -
