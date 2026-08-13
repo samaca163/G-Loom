@@ -1,20 +1,18 @@
 # CLAUDE.md — context for future Claude Code sessions on G-Loom
 
-This file is the single document a future Claude session should read first to get oriented. It captures the project's thesis, architecture, conventions, and the design decisions that aren't obvious from the code. The user's persistent memory under `~/.claude/projects/D--Code-Projects-G-BIM/memory/` holds the same conclusions in smaller pieces — this file is the consolidated narrative.
-
-> Note on the directory name: the repo lives in `D:\Code Projects\G-BIM\` for legacy reasons (the project was previously named G-BIM). The product is **G-Loom**; the local folder name is incidental and can be renamed at the user's convenience without touching code.
+This file is the single document a future Claude session should read first to get oriented. It captures the project's thesis, architecture, conventions, and the design decisions that aren't obvious from the code. The user's persistent memory under `~/.claude/projects/D--Code-Projects-G-Loom/memory/` holds the same conclusions in smaller pieces — this file is the consolidated narrative. The strategic direction (history, market position, viability, roadmap rationale) lives in `docs/STRATEGY.md`.
 
 ## What G-Loom is, in one sentence
 
-**Version control for parametric Grasshopper systems** — git-style, but versions the *recipe* (the Grasshopper graph that produces the geometry) rather than the geometry itself.
+**The record of decisions for parametric design** — git-based version control that versions the *recipe* (the Grasshopper graph that produces the geometry) rather than the geometry itself; the visual diff, assisted merge, toolchain pinning, and provenance layer for Grasshopper.
 
 ## The thesis (read this first)
 
 Existing AEC tools version the *result*: a 500–800 MB Revit central file, snapshot per save, hundreds of GB over a project lifetime. Diffs are meaningless ("all bytes changed"). History is a flipbook of frames.
 
-G-Loom flips it: version the parametric recipe. The recipe is single-digit MB. Diffs describe *design moves* — wires rerouted, components added, slider values changed. History becomes a chain of reasoned decisions. Geometry is regenerated from the recipe on demand, or pulled from an LFS-cached snapshot at named milestones.
+G-Loom flips it: version the parametric recipe. The recipe is single-digit MB. Diffs describe *design moves* — wires rerouted, components added, slider values changed. History becomes a chain of reasoned decisions. Geometry is regenerated from the recipe on demand, or pulled from a content-addressed cache (DVC + Drive, per the Cimbra design below) at named milestones.
 
-This is not "git for Grasshopper". It's **process-versioning for parametric design**, and it's what makes the whole substrate (branches, commits, tags, push/pull, merge) feel native to AEC and product workflows instead of grafted on.
+This is not "git for Grasshopper". It's **process-versioning for parametric design**, and it's what makes the whole substrate (branches, commits, tags, push/pull, merge) feel native to AEC and product workflows instead of grafted on. Since the August 2026 strategy review (`docs/STRATEGY.md`), the thesis has three explicit legs: **teams** (diff + assisted merge), **decades** (toolchain pinning + reproducible deliverables), and **the AI era** (the review/rollback/provenance layer for agent-edited definitions — McNeel's MCP server lets LLMs edit live definitions, which makes this machinery safety-critical). Positioning language never says "git for Grasshopper": say *system versions*, *design options*, *the project's memory*.
 
 ## Three supported workflow modes
 
@@ -53,7 +51,7 @@ The two arrows that round-trip the scoped-branch model:
 Both are explicit user actions. No magic auto-sync.
 
 ### Toolchain pinning
-Every tag records the Rhino / GH / RiR / plugin versions used to produce that recipe. Without this, recipe-versioning fails at decade horizons (Rhino 10 / GH 5 / RiR 4 in 2032 may not run a 2026 recipe identically). Combined with LFS-cached post-solve geometry at the same tag, the geometry is recoverable even if the runtime has rotted.
+Every tag records the Rhino / GH / RiR / plugin versions used to produce that recipe. Without this, recipe-versioning fails at decade horizons (Rhino 10 / GH 5 / RiR 4 in 2032 may not run a 2026 recipe identically). Combined with DVC/Drive-cached post-solve geometry at the same tag, the geometry is recoverable even if the runtime has rotted. This is also the best-evidenced unmet pain in the ecosystem: McNeel's own Package Restore explicitly installs "the latest stable version" when the exact one is missing — the precise failure mode behind the largest cluster of "my old definition is broken" forum threads. No competitor touches it.
 
 ### Recipe vs deliverable
 The recipe is the durable artifact. Deliverables (`.rvt`, `.ifc`, `.dwg`, `.step`, `.iges`) are exports generated *from* the recipe at tag time. AEC contracts demand deliverable files; G-Loom's job is to make those exports reproducible from a versioned recipe.
@@ -166,11 +164,12 @@ Lockstep both deploy scripts when you change deploy logic — the user may test 
 - **Per-fix commits.** When multiple distinct bugs are fixed in one session, prefer multiple focused commits with conventional prefixes (`feat:`, `fix:`, `chore:`, `docs:`, `refactor:`). The user has explicitly preferred this and we've split commits via reset-and-replay before.
 
 ### What the user has reviewed and approved
-- Recipe-versioning thesis (the central pitch)
+- Recipe-versioning thesis (the central pitch), evolved August 2026 to "the record of decisions" three-leg framing (teams / decades / AI era) — see `docs/STRATEGY.md`
 - Three-mode scope (AEC primary, Product secondary, Tool/Library tertiary)
 - Branches-as-systems framing
-- Scoped branches + promote/refresh round-trip (Phase 6 design — not yet built)
-- Phase order: tags → visual diff → remotes → merge → scoped branches → heavy-geom → polish
+- Scoped branches + promote/refresh round-trip (designed, demoted to post-launch)
+- Roadmap order (revised 2026-08-13): de-risk/harden → assisted merge → launch (go public + Yak/food4rhino) → AI layer → element versioning/Cimbra
+- Product/venture ambition with a gated public launch (repo stays private until the Phase 7 gate)
 - Panel-only UX (no GH ribbon components)
 - Name: G-Loom (renamed from G-BIM)
 
@@ -233,21 +232,9 @@ All optional fields with `= null` defaults; older documents parse cleanly and ol
 - Restoring downstream consumer wires when restoring a deleted component — visible via missing-wire arrows; the user manually rewires (the visualization is honest and predictable).
 - Restore-on-add (deleting a newly-added component) — not implemented; UX risk of accidentally trashing work.
 
-### Phase 4 — First pass landed (built clean, awaiting smoke test on Windows)
+### Phase 4 — Shipped in v0.2.0/v0.2.1 (smoke-test pass still pending)
 
-**Team collaboration: remotes, push/pull/fetch, upstream tracking, smart Sync.** Implementation merged locally and the macOS-side `.gha` is in `~/Library/.../Libraries/G-Loom/`. **Not yet deployed on Windows and not yet smoke-tested.**
-
-**Next session: start with the Windows smoke test.**
-
-1. **Deploy on Windows first** — close Rhino, run `build/deploy-local.ps1`. The macOS deploy is already done from the previous session but the user's real Rhino is on Windows; that's where actual exercise happens.
-2. Open a tracked `.gh` → confirm two new rows appear in the panel after `Branch:`:
-   - `Remote:` button showing `(no remote) ▼`
-   - `Sync:` row showing `(no remote configured)` with a disabled Sync button
-3. Click `Remote ▼` → `Add remote...` → name `origin`, paste a real URL.
-4. Remote button should now read `origin (no upstream) ▼`; Sync button label should switch to **Push**.
-5. Click **Push** — first push auto-sets upstream via `-u`. After it succeeds the Remote button should show `origin/<branch>` and the Sync row should read `✓ up to date`.
-6. Commit something locally → Sync flips to `↑1` / **Push**. Push it. Verify it appears on the remote.
-7. From another clone (or by editing on the remote and pushing), get the local copy behind. Sync should show `↓N` / **Pull** and pulling should swap the canvases.
+**Team collaboration: remotes, push/pull/fetch, upstream tracking, smart Sync.** Landed on `main` and shipped in the v0.2.0/v0.2.1 releases, alongside the performance overhaul (see the Performance architecture section) and the commit dialog. The full Windows smoke-test pass over remotes/sync + the dialog is **still pending** and is part of Phase 5 (De-risk) — the 7-step exercise: deploy via `build/deploy-local.ps1` with Rhino closed → confirm `Remote:`/`Sync:` rows → add a remote → first Push auto-sets upstream → commit shows `↑1` → get behind and Pull swaps canvases → commit through the dialog and check the Notes drawer.
 
 **What was built (high-level):**
 
@@ -272,9 +259,30 @@ All optional fields with `= null` defaults; older documents parse cleanly and ol
 - **Credentials are entirely delegated to git's helpers** (Windows Credential Manager, macOS Keychain, SSH agent). No custom credential UI.
 - **Single-remote scope.** Multiple remotes still work mechanically (the menu handles N), but UX is optimized for the one-remote case the user said is dominant.
 
-### Beyond Phase 4
+### The roadmap (revised August 2026 — see docs/STRATEGY.md for the full rationale)
 
-See README's Roadmap section. Roughly: merge with on-canvas conflict UI (Phase 5) → scoped branches with promote/refresh (Phase 6) → LFS for heavy geometry (Phase 7) → audit, distribution, polish (Phase 8).
+The strategy review replaced the old Phase 5–8 order. The drivers: Grasshopper 2 entered beta inside the Rhino 9 Beta (binary `.ghz`, no `.ghx` export, GH1 plugins don't load, and McNeel hints at built-in version comparison); the category's history shows **merge is the product, diff is the demo** (Pancake's author removed his GH compare tool for exactly this reason); and McNeel's MCP server means AI agents now edit live definitions, making review/rollback/provenance machinery safety-critical.
+
+- **Phase 5 — De-risk & harden** *(current)*: hands-on GH2 verification in the Rhino 9 Beta; a format-adapter seam so the canonical schema/diff/branch/pinning core is independent of the GH1 file format; GhJSON interop at the boundary; the pending Windows smoke-test pass; a test project for the pure logic (serializer, diff, versioning, trailer parsing).
+- **Phase 6 — Assisted merge** *(the launch-gate feature)*: three-way, on-canvas, assisted — both branches' diffs vs the merge-base rendered with the existing overlay; non-conflicting changes auto-apply; conflicts resolved per-component with take-left/take-right built on the existing right-click restore primitives. Ship the 80% case; never promise auto-merge.
+- **Phase 7 — Launch** *(the go-public gate)*: Phases 5+6 done, smoke-tested on both platforms, Yak package + food4rhino listing, demo GIFs, README/site — then the repo goes public. The Yak registry currently has zero version-control tools; be the first occupant.
+- **Phase 8 — AI layer**: AI commit narratives (LLM upgrade of the dialog's deterministic draft); MCP-aware "an agent edited this — review the diff" flow; provenance stamping (commit SHA + toolchain pin) into Speckle version metadata.
+- **Phase 9 — Element versioning / Cimbra** (the design below).
+- Scoped branches + promote/refresh are demoted to post-launch. git-LFS is formally replaced by the DVC/Cimbra design.
+
+### Element versioning + the Cimbra storage substrate (designed 2026-06-18, merged here from the feature branch)
+
+**Feature 2 — element versioning** extends versioning down to the elements a recipe produces (facade panels, mullions…), making a project's quantities and qualities a versioned, queryable timeline; downstream goal: a schedule of quantities/qualities and an AI-readable HTML 3D BIM deck relating schedules, pricing, and detail drawings. The unit is a **structured element extract, not heavy geometry**, split across three lanes:
+
+| Content | Form | Lane |
+|---|---|---|
+| Element attributes + quantities (dimensions, material, type, links to price/spec/detail) | small structured text, diffable, AI-readable | **git** (a `<name>.elements.json`-style sibling) |
+| Per-element display geometry (mesh for the 3D deck) | glTF keyed by element ID, pulled on demand | **DVC + Google Drive** |
+| The recipe (`.gh` + `.gloom.json`) | canonical JSON + binary | **git** (already built) |
+
+**Key insight — storage ≠ structure**: DVC+Drive stores the heavy model as one opaque md5 blob; it can return exact bytes but cannot answer element counts, areas, or what changed. The queryable structure must be a new git-lane artifact. The real unbuilt work is the **extractor** (walking elements as RiR/GH produces them); its data source is an open question — possibly new G-Loom components, which is the one place the "no ribbon components" rule is left ajar.
+
+**Cimbra** is the sibling Rust tool (`github.com/samaca163/Cimbra`) that scaffolds an AEC project repo with the three-lane split: `Coding/` on git, `Binary/` (`.rvt`, `.3dm`, renders) on DVC→Drive, `.gloom.json` always on git. **G-Loom should assume it runs inside a Cimbra-scaffolded repo.** Neither repo has any element/metadata code yet.
 
 ## Pointers to the user's persistent memory
 
