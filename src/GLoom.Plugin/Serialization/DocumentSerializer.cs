@@ -205,6 +205,30 @@ public static class DocumentSerializer
 
     private static readonly HashSet<string> s_loggedGradientShapes = new();
 
+    // Per-type reflection memo. The serializer runs on every overlay
+    // recompute, and the per-param probes were the dominant cost: a
+    // dynamic-dispatch call that THREW a RuntimeBinderException for every
+    // param without PersistentDataCount, plus a repeated full property
+    // walk for gradient-named types whose shape never matches. Benign
+    // races (idempotent writes) are acceptable; reads far outnumber them.
+    private sealed class TypeProbe
+    {
+        public bool NameHasGradient;
+        public bool IsMdSliderName;
+        public bool GradientShapeMiss;
+        public bool PersistentDataCountResolved;
+        public System.Reflection.PropertyInfo? PersistentDataCount;
+    }
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Type, TypeProbe>
+        s_typeProbes = new();
+
+    private static TypeProbe ProbeFor(Type type) => s_typeProbes.GetOrAdd(type, static t => new TypeProbe
+    {
+        NameHasGradient = t.Name.IndexOf("gradient", StringComparison.OrdinalIgnoreCase) >= 0,
+        IsMdSliderName = t.Name is "GH_MdSlider" or "GH_MDSlider" or "GH_MultiDimensionalSlider",
+    });
+
     /// <summary>
     /// Structural gradient capture — gates on a fuzzy type-name match
     /// (anything containing "gradient"), then walks the param's public
@@ -218,8 +242,9 @@ public static class DocumentSerializer
     private static PersistentData? TryCaptureGradientReflective(object obj)
     {
         if (obj is null) return null;
+        var probe = ProbeFor(obj.GetType());
+        if (!probe.NameHasGradient || probe.GradientShapeMiss) return null;
         var typeName = obj.GetType().Name;
-        if (typeName.IndexOf("gradient", StringComparison.OrdinalIgnoreCase) < 0) return null;
 
         try
         {
@@ -232,6 +257,12 @@ public static class DocumentSerializer
                 stops.Sort((a, b) => a.Position.CompareTo(b.Position));
                 return new PersistentData(Kind: "gradient", GradientStops: stops);
             }
+
+            // Deterministic structural miss: this type's shape doesn't
+            // expose stops. Remember it so the expensive property walk
+            // never runs again for this type (exceptions do NOT latch -
+            // a transient failure keeps its retry).
+            probe.GradientShapeMiss = true;
 
             if (s_loggedGradientShapes.Add(typeName))
             {
@@ -470,8 +501,7 @@ public static class DocumentSerializer
     /// </summary>
     private static PersistentData? TryCaptureMdSliderReflective(IGH_Param param)
     {
-        var typeName = param.GetType().Name;
-        if (typeName is not ("GH_MdSlider" or "GH_MDSlider" or "GH_MultiDimensionalSlider"))
+        if (!ProbeFor(param.GetType()).IsMdSliderName)
             return null;
 
         try
@@ -515,10 +545,21 @@ public static class DocumentSerializer
 
     private static int TryGetPersistentDataCount(IGH_Param param)
     {
+        // Property lookup memoized per type. The previous dynamic dispatch
+        // threw (and swallowed) a RuntimeBinderException for every param
+        // type without the property, on every serialize.
+        var probe = ProbeFor(param.GetType());
+        if (!probe.PersistentDataCountResolved)
+        {
+            probe.PersistentDataCount = param.GetType().GetProperty(
+                "PersistentDataCount",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+            probe.PersistentDataCountResolved = true;
+        }
+
         try
         {
-            dynamic dyn = param;
-            return (int)dyn.PersistentDataCount;
+            return probe.PersistentDataCount?.GetValue(param) is int n ? n : 0;
         }
         catch
         {
