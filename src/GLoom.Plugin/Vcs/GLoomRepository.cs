@@ -804,9 +804,15 @@ public static class GLoomRepository
 
     private readonly record struct ProcResult(int ExitCode, string StdOut, string StdErr);
 
+    // Local git ops finish in tens of milliseconds; only a truly wedged process
+    // trips this. Network ops get longer: GUI credential-helper popups and slow
+    // transfers are legitimate (GIT_TERMINAL_PROMPT=0 only stops TTY prompts).
+    private const int LocalTimeoutMs = 30_000;
+    private const int NetworkTimeoutMs = 120_000;
+
     private static ProcResult Run(string workingDir, params string[] args)
     {
-        return RunInternal(workingDir, args, suppressTerminalPrompt: false);
+        return RunInternal(workingDir, args, suppressTerminalPrompt: false, LocalTimeoutMs);
     }
 
     /// <summary>
@@ -817,10 +823,11 @@ public static class GLoomRepository
     /// </summary>
     private static ProcResult RunNetwork(string workingDir, params string[] args)
     {
-        return RunInternal(workingDir, args, suppressTerminalPrompt: true);
+        return RunInternal(workingDir, args, suppressTerminalPrompt: true, NetworkTimeoutMs);
     }
 
-    private static ProcResult RunInternal(string workingDir, string[] args, bool suppressTerminalPrompt)
+    private static ProcResult RunInternal(
+        string workingDir, string[] args, bool suppressTerminalPrompt, int timeoutMs)
     {
         var psi = new ProcessStartInfo
         {
@@ -840,10 +847,21 @@ public static class GLoomRepository
         {
             using var proc = Process.Start(psi)
                 ?? throw new InvalidOperationException("Process.Start returned null.");
-            var stdout = proc.StandardOutput.ReadToEnd();
-            var stderr = proc.StandardError.ReadToEnd();
-            proc.WaitForExit();
-            return new ProcResult(proc.ExitCode, stdout, stderr);
+            // Drain both pipes concurrently: reading stdout to completion before
+            // touching stderr deadlocks when git fills the stderr pipe buffer
+            // first (checkout/commit/tag all write progress there).
+            var stdout = proc.StandardOutput.ReadToEndAsync();
+            var stderr = proc.StandardError.ReadToEndAsync();
+            if (!proc.WaitForExit(timeoutMs))
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { }
+                System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] { stdout, stderr }, 2000);
+                Rhino.RhinoApp.WriteLine(
+                    $"[G-Loom] git {(args.Length > 0 ? args[0] : "?")} timed out after {timeoutMs / 1000}s and was killed.");
+                return new ProcResult(-1, SafeResult(stdout), SafeResult(stderr));
+            }
+            System.Threading.Tasks.Task.WaitAll(stdout, stderr);
+            return new ProcResult(proc.ExitCode, stdout.Result, stderr.Result);
         }
         catch (System.ComponentModel.Win32Exception ex)
         {
@@ -851,4 +869,7 @@ public static class GLoomRepository
                 $"Could not launch git at '{psi.FileName}'. Is git installed? ({ex.Message})", ex);
         }
     }
+
+    private static string SafeResult(System.Threading.Tasks.Task<string> t) =>
+        t.IsCompletedSuccessfully ? t.Result : string.Empty;
 }
