@@ -36,6 +36,17 @@ public sealed class DocumentTracker
     private readonly HashSet<GH_Document> _hooked = new();
     private readonly HashSet<GH_Canvas> _hookedCanvases = new();
 
+    // Working-tree match memo. ModifiedChanged fires in a flood during editing
+    // but never touches disk, so two file stats decide whether the git match
+    // can be skipped entirely. All UpdateActive entry points are GH/Eto UI
+    // events, so plain fields are safe without locks. A null _matchedSha is a
+    // valid cached answer ("matches no commit" - the normal dirty state).
+    private sealed record MatchCacheKey(
+        string Repo, string GhFull, string JsonFull,
+        long GhLen, long GhWriteTicks, long JsonLen, long JsonWriteTicks);
+    private MatchCacheKey? _matchKey;
+    private string? _matchedSha;
+
     private DocumentTracker() { }
 
     public TrackedState State => _state;
@@ -85,7 +96,7 @@ public sealed class DocumentTracker
         doc.ModifiedChanged += (_, _) => UpdateActive(doc);
     }
 
-    private void UpdateActive(GH_Document? doc)
+    private void UpdateActive(GH_Document? doc, bool forceMatch = false)
     {
         var path = doc?.IsFilePathDefined == true ? doc.FilePath : null;
         var repo = RepoDiscovery.FindRepoRoot(path);
@@ -101,9 +112,12 @@ public sealed class DocumentTracker
         string? currentSha = null;
         if (isTracked && !string.IsNullOrEmpty(jsonFull) && !string.IsNullOrEmpty(path))
         {
-            var ghRel = Path.GetRelativePath(repo!, path);
-            var jsonRel = Path.GetRelativePath(repo!, jsonFull);
-            currentSha = GLoomRepository.FindCommitMatchingWorkingTree(repo!, ghRel, jsonRel);
+            currentSha = ResolveCurrentSha(repo!, path, jsonFull, forceMatch);
+        }
+        else
+        {
+            _matchKey = null;
+            _matchedSha = null;
         }
 
         var newState = new TrackedState(
@@ -126,11 +140,41 @@ public sealed class DocumentTracker
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    private string? ResolveCurrentSha(string repo, string ghFull, string jsonFull, bool force)
+    {
+        var key = new MatchCacheKey(
+            repo, ghFull, jsonFull,
+            StatLen(ghFull), StatTicks(ghFull), StatLen(jsonFull), StatTicks(jsonFull));
+        if (!force && key == _matchKey) return _matchedSha;
+
+        _matchedSha = GLoomRepository.FindCommitMatchingWorkingTree(
+            repo,
+            Path.GetRelativePath(repo, ghFull),
+            Path.GetRelativePath(repo, jsonFull));
+        _matchKey = key;
+        return _matchedSha;
+    }
+
+    private static long StatLen(string path)
+    {
+        try { var fi = new FileInfo(path); return fi.Exists ? fi.Length : -1; }
+        catch { return -1; }
+    }
+
+    private static long StatTicks(string path)
+    {
+        try { var fi = new FileInfo(path); return fi.Exists ? fi.LastWriteTimeUtc.Ticks : 0; }
+        catch { return 0; }
+    }
+
     /// <summary>
     /// Forces a refresh from the current canvas - useful after a commit so the
-    /// panel re-reads branch/last-commit info.
+    /// panel re-reads branch/last-commit info. Bypasses the match memo:
+    /// a checkout can change history without changing file bytes or mtimes
+    /// (content-identical branches), which the stat key cannot see.
     /// </summary>
-    public void Refresh() => UpdateActive(_state.Document ?? Instances.ActiveCanvas?.Document);
+    public void Refresh() =>
+        UpdateActive(_state.Document ?? Instances.ActiveCanvas?.Document, forceMatch: true);
 
     /// <summary>
     /// Replaces the active Grasshopper document with the one freshly read from
