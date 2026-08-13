@@ -11,8 +11,8 @@
 *.md text
 
 # Grasshopper definition files
-# Treat as binary for now; Phase 1 will add a custom merge driver
-# and switch these to a structured-text representation.
+# .gh stays binary; the diff-friendly representation is the .gloom.json
+# sidecar the plugin maintains, not a merge driver.
 *.gh binary
 *.ghx text eol=lf
 *.ghcluster binary
