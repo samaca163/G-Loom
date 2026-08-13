@@ -125,6 +125,7 @@ public sealed class CanvasDiffOverlay
         _initialized = true;
 
         Instances.CanvasCreated += HookCanvas;
+        Instances.CanvasDestroyed += UnhookCanvas;
         if (Instances.ActiveCanvas is { } ac) HookCanvas(ac);
 
         // Any tracker state change invalidates the diff cache (the live
@@ -168,10 +169,14 @@ public sealed class CanvasDiffOverlay
     // the constructor on macOS, where NativeWindow isn't part of
     // Rhino's WinForms shim and would fail to load.
     private readonly Dictionary<GH_Canvas, object> _rightClickHooks = new();
+    private readonly HashSet<GH_Canvas> _hookedCanvases = new();
 
     private void HookCanvas(GH_Canvas canvas)
     {
-        if (canvas is null) return;
+        // Idempotency guard: Initialize() hooks the already-active canvas
+        // AND subscribes CanvasCreated; without this a double subscription
+        // would paint the whole overlay twice per frame.
+        if (canvas is null || !_hookedCanvases.Add(canvas)) return;
         canvas.CanvasPostPaintObjects += OnPostPaintObjects;
         canvas.MouseMove += OnCanvasMouseMove;
         canvas.MouseLeave += OnCanvasMouseLeave;
@@ -189,10 +194,27 @@ public sealed class CanvasDiffOverlay
             InstallWindowsRightClickHook(canvas);
     }
 
+    private void UnhookCanvas(GH_Canvas canvas)
+    {
+        if (canvas is null || !_hookedCanvases.Remove(canvas)) return;
+        canvas.CanvasPostPaintObjects -= OnPostPaintObjects;
+        canvas.MouseMove -= OnCanvasMouseMove;
+        canvas.MouseLeave -= OnCanvasMouseLeave;
+
+        if (OperatingSystem.IsWindows())
+            RemoveWindowsRightClickHook(canvas);
+    }
+
     private void InstallWindowsRightClickHook(GH_Canvas canvas)
     {
         if (!_rightClickHooks.ContainsKey(canvas))
             _rightClickHooks[canvas] = new GhostRightClickHook(this, canvas);
+    }
+
+    private void RemoveWindowsRightClickHook(GH_Canvas canvas)
+    {
+        if (_rightClickHooks.Remove(canvas, out var hook))
+            ((GhostRightClickHook)hook).Detach();
     }
 
     /// <summary>
@@ -240,6 +262,17 @@ public sealed class CanvasDiffOverlay
 
         private void OnHandleCreated(object? sender, EventArgs e) => AssignHandle(_canvas.Handle);
         private void OnHandleDestroyed(object? sender, EventArgs e) => ReleaseHandle();
+
+        /// <summary>
+        /// Fully detaches from the canvas so the overlay singleton doesn't
+        /// pin destroyed canvases for the process lifetime.
+        /// </summary>
+        public void Detach()
+        {
+            _canvas.HandleCreated -= OnHandleCreated;
+            _canvas.HandleDestroyed -= OnHandleDestroyed;
+            if (Handle != IntPtr.Zero) ReleaseHandle();
+        }
 
         protected override void WndProc(ref System.Windows.Forms.Message m)
         {
