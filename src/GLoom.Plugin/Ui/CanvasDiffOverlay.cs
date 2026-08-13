@@ -153,7 +153,10 @@ public sealed class CanvasDiffOverlay
         if (field == value) return;
         field = value;
         SettingsChanged?.Invoke(this, EventArgs.Empty);
-        if (Enabled) Instances.ActiveCanvas?.Refresh();
+        // Deferred Invalidate, not synchronous Refresh: filters apply at
+        // paint time against the cached diff, so a toggle needs no
+        // recompute and the next paint pass is soon enough.
+        if (Enabled) Instances.ActiveCanvas?.Invalidate();
     }
 
     private CanvasDiffOverlay() { }
