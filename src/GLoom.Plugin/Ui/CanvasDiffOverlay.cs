@@ -99,7 +99,7 @@ public sealed class CanvasDiffOverlay
     private DocumentDiff? _cachedDiff;
     private CanonicalDocument? _cachedFromDoc;
     private GH_Document? _diffDoc;
-    private HashSet<string> _hoverableIds = new(StringComparer.Ordinal);
+    private readonly List<(string Id, IGH_DocumentObject Obj)> _hoverTargets = new();
     private string? _hoveredId;
     private bool _initialized;
     private string? _lastTrackedFilePath;
@@ -572,7 +572,14 @@ public sealed class CanvasDiffOverlay
     {
         if (!Enabled) return;
         if (sender is not GH_Canvas canvas || canvas.Document is null) return;
-        if (_hoverableIds.Count == 0)
+
+        // Hover only affects rendering in hover-details mode (paint's
+        // showExtras is unconditionally true otherwise), so in the default
+        // always-show mode the old per-move hit test - which walked EVERY
+        // document object allocating a Guid string each, then forced a
+        // synchronous full-canvas repaint that changed no pixels - was
+        // pure overhead.
+        if (!HoverDetailsOnly || _hoverTargets.Count == 0)
         {
             ClearHover(canvas);
             return;
@@ -588,11 +595,10 @@ public sealed class CanvasDiffOverlay
             return;
         }
 
+        // Last match wins for overlapping items, as before.
         string? newHover = null;
-        foreach (var obj in canvas.Document.Objects)
+        foreach (var (id, obj) in _hoverTargets)
         {
-            var id = obj.InstanceGuid.ToString("D");
-            if (!_hoverableIds.Contains(id)) continue;
             var bounds = obj.Attributes?.Bounds ?? RectangleF.Empty;
             if (!bounds.IsEmpty && bounds.Contains(worldPt))
                 newHover = id;
@@ -601,7 +607,7 @@ public sealed class CanvasDiffOverlay
         if (newHover != _hoveredId)
         {
             _hoveredId = newHover;
-            canvas.Refresh();
+            canvas.Invalidate();
         }
     }
 
@@ -614,7 +620,7 @@ public sealed class CanvasDiffOverlay
     {
         if (_hoveredId is null) return;
         _hoveredId = null;
-        if (Enabled) canvas.Refresh();
+        if (Enabled) canvas.Invalidate();
     }
 
     private void OnPostPaintObjects(GH_Canvas canvas)
@@ -641,14 +647,17 @@ public sealed class CanvasDiffOverlay
 
     private void RebuildHoverableIndex()
     {
-        _hoverableIds.Clear();
+        _hoverTargets.Clear();
         if (_cachedDiff is null) return;
         foreach (var c in _cachedDiff.ObjectsModified)
         {
             // Anything with extras worth revealing on hover: a movement
             // trail, a persistent ghost-below, or a panel ghost-above.
-            if ((c.Kinds & (ObjectChangeKind.Moved | ObjectChangeKind.PersistentChanged)) != 0)
-                _hoverableIds.Add(c.To.InstanceGuid);
+            if ((c.Kinds & (ObjectChangeKind.Moved | ObjectChangeKind.PersistentChanged)) != 0
+                && _liveById.TryGetValue(c.To.InstanceGuid, out var obj))
+            {
+                _hoverTargets.Add((c.To.InstanceGuid, obj));
+            }
         }
     }
 
