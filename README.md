@@ -36,13 +36,22 @@ Branches, commits, merges, push/pull, distributed collaboration — decades of b
 
 ## Status
 
-Phase 1 done: commit, log, restore, branches with system-aware UX, multi-file repo isolation, cross-platform (Windows + macOS Rhino 8). Phase 2 underway: tags with toolchain pinning. Phase 3 next: on-canvas visual diff. Free, MIT, open source.
+Phases 1–3 done: commit / log / restore, branches with system-aware UX, multi-file repo isolation, tags with per-tag metadata and toolchain pinning, and the on-canvas visual diff overlay (halos, ghosts, wire arrows, right-click restore, compare-against-any-commit). Phase 4 (team collaboration: remotes, push/pull, smart Sync) is in progress. Cross-platform (Windows + macOS Rhino 8). Free, MIT, open source.
+
+## Install (from a GitHub Release)
+
+1. Download `GLoom.gha` from the [latest release](https://github.com/samaca163/G-Loom/releases).
+2. **Windows only:** right-click the downloaded file → Properties → check **Unblock** → OK. Windows marks downloaded assemblies; Grasshopper silently refuses to load a blocked `.gha`.
+3. Copy it to your Grasshopper libraries folder:
+   - Windows: `%APPDATA%\Grasshopper\Libraries\G-Loom\`
+   - macOS: `~/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper (b45a29b1-4343-4035-989e-044e8580d9cf)/Libraries/G-Loom/`
+4. Restart Rhino and open Grasshopper. You also need the system `git` CLI installed (on `PATH` or in the standard location for your OS).
 
 ## Requirements
 
 - Rhino 8 on macOS or Windows
-- .NET SDK 7 or 8 (for building)
 - System `git` CLI on `PATH` (or in the standard location for your OS)
+- .NET SDK 7 or 8 (only for building from source)
 
 ## Build
 
@@ -88,9 +97,9 @@ Restart Rhino, open Grasshopper. The G-Loom panel auto-opens on first canvas cre
 ## Roadmap
 
 - **Phase 1 — Commit / log / restore foundation.** *(done)* Canonical JSON serializer over `GH_IO`; commit / log / restore via the system `git` CLI; Eto panel; auto-versioned commit messages; multi-file repo isolation; tab-switch sync; cross-platform deploy.
-- **Phase 2 — Tags + toolchain metadata.** *(current)* Lightweight tags for milestones (DD / CD / IFC, software releases, product cert dates). Per-tag metadata schema (submittal info, release notes, toolchain pins). Branch-base markers in history.
-- **Phase 3 — Visual diff & review.** On-canvas diff overlay (add/remove/modify highlighted), branch-vs-branch and tag-vs-tag compare, side-by-side variant view.
-- **Phase 4 — Team collaboration.** Remotes (add/list/remove), push/pull/fetch, credentials, upstream tracking, cross-project library sharing.
+- **Phase 2 — Tags + toolchain metadata.** *(done)* Lightweight tags for milestones (DD / CD / IFC, software releases, product cert dates). Per-tag metadata schema (submittal info, release notes, toolchain pins). Branch-base markers in history.
+- **Phase 3 — Visual diff & review.** *(done)* On-canvas diff overlay (add/remove/modify/move highlighted, per-kind ghosts, wire arrows, right-click restore), compare against any commit.
+- **Phase 4 — Team collaboration.** *(in progress)* Remotes (add/list/remove), push/pull/fetch, smart Sync, upstream tracking, cross-project library sharing.
 - **Phase 5 — Merge & conflict resolution.** Merge with on-canvas conflict UI (per-component "left / right / blend").
 - **Phase 6 — Scoped branches & promote/refresh.** Cut-point picker on the canvas; scope-snapshot internalization; promote (merge sub-system back into trunk); refresh (pull updated input from trunk into scope).
 - **Phase 7 — Heavy geometry & persistence.** LFS-style storage for internalized blobs and tag-time geometry caches; persistent value capture for sliders / panels / internalized data; perf for large definitions.
