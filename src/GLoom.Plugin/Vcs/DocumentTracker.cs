@@ -47,6 +47,8 @@ public sealed class DocumentTracker
     private MatchCacheKey? _matchKey;
     private string? _matchedSha;
 
+    private int _suspendDepth;
+
     private DocumentTracker() { }
 
     public TrackedState State => _state;
@@ -96,8 +98,45 @@ public sealed class DocumentTracker
         doc.ModifiedChanged += (_, _) => UpdateActive(doc);
     }
 
+    /// <summary>
+    /// Batches tracker recomputes across a compound operation (commit, restore,
+    /// repo-wide reload): every UpdateActive raised while the scope is open is
+    /// swallowed, and the outermost dispose runs exactly one forced recompute.
+    /// Always-forced because a clean-document commit fires no events inside the
+    /// scope yet still rewrites files. Resolves the document from the active
+    /// canvas because a reload inside the scope replaces _state.Document with a
+    /// dead instance. Re-entrant via a depth counter; UI-thread only.
+    /// </summary>
+    public IDisposable SuspendUpdates()
+    {
+        _suspendDepth++;
+        return new SuspendScope(this);
+    }
+
+    private sealed class SuspendScope : IDisposable
+    {
+        private DocumentTracker? _tracker;
+
+        public SuspendScope(DocumentTracker tracker) => _tracker = tracker;
+
+        public void Dispose()
+        {
+            var t = _tracker;
+            if (t is null) return;
+            _tracker = null;
+            if (--t._suspendDepth == 0)
+            {
+                t.UpdateActive(
+                    Instances.ActiveCanvas?.Document ?? t._state.Document,
+                    forceMatch: true);
+            }
+        }
+    }
+
     private void UpdateActive(GH_Document? doc, bool forceMatch = false)
     {
+        if (_suspendDepth > 0) return;
+
         var path = doc?.IsFilePathDefined == true ? doc.FilePath : null;
         var repo = RepoDiscovery.FindRepoRoot(path);
         var jsonFull = string.IsNullOrEmpty(path) ? null : RepoDiscovery.CanonicalJsonFullPathFor(path);
@@ -269,8 +308,13 @@ public sealed class DocumentTracker
             ReferenceEquals(a.doc, active) ? 1 :
             ReferenceEquals(b.doc, active) ? -1 : 0);
 
-        foreach (var t in targets)
-            ReloadFromDisk(t.doc, t.path);
+        // Each reload fires DocumentRemoved + DocumentAdded; without the scope
+        // that is 2N full recomputes for an N-document branch switch.
+        using (SuspendUpdates())
+        {
+            foreach (var t in targets)
+                ReloadFromDisk(t.doc, t.path);
+        }
     }
 
     private static bool IsInsideRepo(string filePath, string repoRoot)

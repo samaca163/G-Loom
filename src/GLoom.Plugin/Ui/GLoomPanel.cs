@@ -822,8 +822,9 @@ public sealed class GLoomPanel : Panel
             GLoomRepository.SwitchBranch(s.RepoPath, targetBranch);
             RhinoApp.WriteLine($"[G-Loom] Switched to branch '{targetBranch}'.");
 
+            // ReloadAllInRepo's suspend scope already ends with a forced
+            // tracker recompute, so no explicit tracker Refresh here.
             DocumentTracker.Instance.ReloadAllInRepo(s.RepoPath);
-            DocumentTracker.Instance.Refresh();
             // The branch isn't part of TrackedState, so StateChanged may not
             // fire if working-tree blobs happen to match the prior commit
             // (e.g. branching off the current HEAD). Re-render directly to
@@ -1241,44 +1242,55 @@ public sealed class GLoomPanel : Panel
 
         try
         {
-            // If the canvas has unsaved edits, persist the .gh to disk first.
-            // Otherwise the committed pair (.gh + .gloom.json) is split-brain:
-            // the JSON reflects live state but the .gh is whatever was last
-            // saved - so a future Restore would bring back stale canvas
-            // content. Also: DocumentSerializer is structural-only (Phase 1a),
-            // so a slider/panel-text edit produces an identical JSON; without
-            // saving the .gh first, git sees no changes and the commit is a no-op.
-            if (s.HasUnsavedChanges)
+            string? sha;
+            string msg;
+
+            // The mid-commit IsModified=false below raises ModifiedChanged,
+            // which used to trigger a full tracker recompute (and a panel
+            // refresh, and an overlay recompute) before the commit even ran.
+            // The scope swallows all of it; its dispose performs the single
+            // post-commit recompute, so the explicit Refresh() is gone too.
+            using (DocumentTracker.Instance.SuspendUpdates())
             {
-                var io = new GH_DocumentIO { Document = s.Document };
-                if (!io.SaveQuiet(s.FilePath))
+                // If the canvas has unsaved edits, persist the .gh to disk first.
+                // Otherwise the committed pair (.gh + .gloom.json) is split-brain:
+                // the JSON reflects live state but the .gh is whatever was last
+                // saved - so a future Restore would bring back stale canvas
+                // content. Also: DocumentSerializer is structural-only (Phase 1a),
+                // so a slider/panel-text edit produces an identical JSON; without
+                // saving the .gh first, git sees no changes and the commit is a no-op.
+                if (s.HasUnsavedChanges)
                 {
-                    MessageBox.Show(
-                        "Could not save the .gh file before commit. Aborting.",
-                        "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
-                    return;
+                    var io = new GH_DocumentIO { Document = s.Document };
+                    if (!io.SaveQuiet(s.FilePath))
+                    {
+                        MessageBox.Show(
+                            "Could not save the .gh file before commit. Aborting.",
+                            "G-Loom", MessageBoxButtons.OK, MessageBoxType.Error);
+                        return;
+                    }
+                    s.Document.IsModified = false;
                 }
-                s.Document.IsModified = false;
+
+                var canonical = DocumentSerializer.Serialize(s.Document);
+                var json = CanonicalJson.Write(canonical);
+
+                var ghBase = Path.GetFileNameWithoutExtension(s.FilePath);
+                var jsonFull = s.CanonicalJsonFullPath!;
+                var ghRel = Path.GetRelativePath(s.RepoPath, s.FilePath);
+                var jsonRel = Path.GetRelativePath(s.RepoPath, jsonFull);
+                // Count commits touching either file. JSON-only would miss
+                // slider-only commits (Phase 1a serializer is structural-only,
+                // so those commits don't touch the JSON), causing the message
+                // to repeat a previous version number.
+                var nextV = CommitVersioning.NextVersion(s.RepoPath, ghRel, jsonRel);
+                msg = CommitVersioning.FormatMessage(ghBase, nextV);
+
+                sha = GLoomRepository.Commit(
+                    s.RepoPath, json, jsonFull, msg,
+                    authorName: "iSamacA", authorEmail: "samaca163@gmail.com",
+                    alsoStageFullPath: s.FilePath);
             }
-
-            var canonical = DocumentSerializer.Serialize(s.Document);
-            var json = CanonicalJson.Write(canonical);
-
-            var ghBase = Path.GetFileNameWithoutExtension(s.FilePath);
-            var jsonFull = s.CanonicalJsonFullPath!;
-            var ghRel = Path.GetRelativePath(s.RepoPath, s.FilePath);
-            var jsonRel = Path.GetRelativePath(s.RepoPath, jsonFull);
-            // Count commits touching either file. JSON-only would miss
-            // slider-only commits (Phase 1a serializer is structural-only,
-            // so those commits don't touch the JSON), causing the message
-            // to repeat a previous version number.
-            var nextV = CommitVersioning.NextVersion(s.RepoPath, ghRel, jsonRel);
-            var msg = CommitVersioning.FormatMessage(ghBase, nextV);
-
-            var sha = GLoomRepository.Commit(
-                s.RepoPath, json, jsonFull, msg,
-                authorName: "iSamacA", authorEmail: "samaca163@gmail.com",
-                alsoStageFullPath: s.FilePath);
 
             if (sha is null)
             {
@@ -1288,7 +1300,6 @@ public sealed class GLoomPanel : Panel
             else
             {
                 RhinoApp.WriteLine($"[G-Loom] Committed {sha[..7]} ({msg})");
-                DocumentTracker.Instance.Refresh();
             }
         }
         catch (Exception ex)
@@ -1325,18 +1336,22 @@ public sealed class GLoomPanel : Panel
         {
             var ghRel = Path.GetRelativePath(s.RepoPath, s.FilePath);
             var jsonRel = Path.GetRelativePath(s.RepoPath, s.CanonicalJsonFullPath!);
-
-            // 1. Replace the on-disk files with their content at <sha>.
-            GLoomRepository.Restore(s.RepoPath, sha, new[] { ghRel, jsonRel });
-            RhinoApp.WriteLine($"[G-Loom] Checked out {sha7} ({message}) on disk.");
-
-            // 2. Reload the .gh from disk in-place. The DocumentServer's
-            //    DocumentRemoved/Added events fire, so the tracker re-resolves
-            //    the active document - and the new "current commit" derivation
-            //    in DocumentTracker reads the working tree blob hash to figure
-            //    out which commit we're now on. No explicit marker needed.
             var filePath = s.FilePath;
-            var newDoc = DocumentTracker.Instance.ReloadFromDisk(filePath);
+            GH_Document? newDoc;
+
+            // The reload fires DocumentRemoved + DocumentAdded, each a full
+            // tracker recompute; the scope coalesces them into one at dispose.
+            using (DocumentTracker.Instance.SuspendUpdates())
+            {
+                // 1. Replace the on-disk files with their content at <sha>.
+                GLoomRepository.Restore(s.RepoPath, sha, new[] { ghRel, jsonRel });
+                RhinoApp.WriteLine($"[G-Loom] Checked out {sha7} ({message}) on disk.");
+
+                // 2. Reload the .gh from disk in-place. The tracker's forced
+                //    recompute at scope end re-derives "current commit" from
+                //    the working-tree blob pair. No explicit marker needed.
+                newDoc = DocumentTracker.Instance.ReloadFromDisk(filePath);
+            }
 
             if (newDoc is null)
             {
