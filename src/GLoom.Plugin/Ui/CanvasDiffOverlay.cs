@@ -869,19 +869,25 @@ public sealed class CanvasDiffOverlay
         // (Guid.ToString("D")); rebuilt per recompute, not per frame.
         var liveById = s._liveById;
 
+        // World-space viewport for culling: items far outside the visible
+        // region skip their text/gradient rendering entirely. Margins are
+        // generous so labels and previews extending past item bounds never
+        // pop at the viewport edge; hit-test registration and wire anchors
+        // are NOT culled (an off-screen deleted source still anchors a
+        // wire to an on-screen consumer).
+        var visible = canvas.Viewport.VisibleRegion;
+
         var deletionRects = new Dictionary<string, RectangleF>(StringComparer.Ordinal);
         if (s.ShowDeleted)
         {
             foreach (var removed in diff.ObjectsRemoved)
             {
-                var rect = PaintDeletedGhost(graphics, removed);
-                if (!rect.IsEmpty)
-                {
-                    deletionRects[removed.InstanceGuid] = rect;
-                    s._ghostRegions.Add(new GhostRegion(rect, GhostRestoreKind.Deleted, null, removed));
-                }
+                var rect = DeletedGhostRect(removed);
+                deletionRects[removed.InstanceGuid] = rect;
+                s._ghostRegions.Add(new GhostRegion(rect, GhostRestoreKind.Deleted, null, removed));
+                if (!visible.IntersectsWith(RectangleF.Inflate(rect, 80f, 80f))) continue;
+                PaintDeletedGhost(graphics, removed, rect);
             }
-
         }
 
         // Wire deltas: red dashed arrows for missing wires (existed in
@@ -892,8 +898,8 @@ public sealed class CanvasDiffOverlay
         // bounding-rect edges.
         if (s._cachedFromDoc is not null)
         {
-            PaintMissingWires(graphics, diff, s._liveOutputSources, liveById, deletionRects);
-            PaintAddedWires(graphics, diff, s._liveOutputSources, liveById);
+            PaintMissingWires(graphics, diff, s._liveOutputSources, liveById, deletionRects, visible);
+            PaintAddedWires(graphics, diff, s._liveOutputSources, liveById, visible);
         }
 
         // Bucket each modified change as either "Moved" (move-only) or
@@ -910,6 +916,22 @@ public sealed class CanvasDiffOverlay
 
             var isHovered = hoveredId == change.To.InstanceGuid;
             var showExtras = !s.HoverDetailsOnly || isHovered;
+
+            // Cull on the union of live and (for moves) old bounds so a
+            // trail whose far end is on-screen still renders.
+            var liveBounds = live.Attributes?.Bounds ?? RectangleF.Empty;
+            if (!liveBounds.IsEmpty)
+            {
+                var cullRect = liveBounds;
+                if ((change.Kinds & ObjectChangeKind.Moved) != 0)
+                {
+                    var livePivot = live.Attributes?.Pivot ?? PointF.Empty;
+                    var old = liveBounds;
+                    old.Offset(change.From.Pivot.X - livePivot.X, change.From.Pivot.Y - livePivot.Y);
+                    cullRect = RectangleF.Union(cullRect, old);
+                }
+                if (!visible.IntersectsWith(RectangleF.Inflate(cullRect, 120f, 200f))) continue;
+            }
 
             if ((change.Kinds & ObjectChangeKind.Moved) != 0 && s.ShowMoved && showExtras)
             {
@@ -939,6 +961,9 @@ public sealed class CanvasDiffOverlay
                 : ChangeBucket.Modified;
             if (!ShowsBucket(s, bucket)) continue;
 
+            var b = live.Attributes?.Bounds ?? RectangleF.Empty;
+            if (!b.IsEmpty && !visible.IntersectsWith(RectangleF.Inflate(b, 20f, 20f))) continue;
+
             var pen = change.Kinds == ObjectChangeKind.Moved
                 ? OverlayResources.HaloMoved
                 : OverlayResources.HaloModified;
@@ -948,8 +973,12 @@ public sealed class CanvasDiffOverlay
         if (s.ShowAdded)
         {
             foreach (var added in diff.ObjectsAdded)
-                if (liveById.TryGetValue(added.InstanceGuid, out var live))
-                    PaintHalo(graphics, live, OverlayResources.HaloAdded);
+            {
+                if (!liveById.TryGetValue(added.InstanceGuid, out var live)) continue;
+                var b = live.Attributes?.Bounds ?? RectangleF.Empty;
+                if (!b.IsEmpty && !visible.IntersectsWith(RectangleF.Inflate(b, 20f, 20f))) continue;
+                PaintHalo(graphics, live, OverlayResources.HaloAdded);
+            }
         }
 
         // Panel previews follow the HoverDetailsOnly mode: in always-show,
@@ -964,6 +993,11 @@ public sealed class CanvasDiffOverlay
 
                 var isHovered = hoveredId == change.To.InstanceGuid;
                 if (s.HoverDetailsOnly && !isHovered) continue;
+
+                // Preview height is text-dependent; the tall margin keeps
+                // near-edge previews from popping.
+                var b = live.Attributes?.Bounds ?? RectangleF.Empty;
+                if (!b.IsEmpty && !visible.IntersectsWith(RectangleF.Inflate(b, 300f, 600f))) continue;
 
                 PaintPanelHoverPreview(graphics, live, change.From);
             }
@@ -1488,7 +1522,8 @@ public sealed class CanvasDiffOverlay
         DocumentDiff diff,
         Dictionary<string, (IGH_Param Param, IGH_DocumentObject Owner)> liveOutputSources,
         Dictionary<string, IGH_DocumentObject> liveById,
-        Dictionary<string, RectangleF> deletionRects)
+        Dictionary<string, RectangleF> deletionRects,
+        RectangleF visible)
     {
         // Source-anchor lookups keyed by output PARAM GUID (the GUID
         // that appears in downstream input.Sources). Live anchors come
@@ -1540,7 +1575,7 @@ public sealed class CanvasDiffOverlay
                 {
                     if (!TryFindWireAnchor(src, liveOutputSources, ghostOutputAnchors, out var srcAnchor)) continue;
                     var consumerAnchor = LiveInputAnchor(consumer, consumerInputs, i);
-                    DrawWireBezier(g, pen, srcAnchor, consumerAnchor);
+                    DrawWireBezier(g, pen, srcAnchor, consumerAnchor, visible);
                 }
             }
         }
@@ -1560,7 +1595,7 @@ public sealed class CanvasDiffOverlay
                 foreach (var src in removed.Inputs[i].Sources)
                 {
                     if (TryFindWireAnchor(src, liveOutputSources, ghostOutputAnchors, out var srcAnchor))
-                        DrawWireBezier(g, pen, srcAnchor, consumerAnchor);
+                        DrawWireBezier(g, pen, srcAnchor, consumerAnchor, visible);
                 }
             }
         }
@@ -1582,7 +1617,8 @@ public sealed class CanvasDiffOverlay
         Graphics g,
         DocumentDiff diff,
         Dictionary<string, (IGH_Param Param, IGH_DocumentObject Owner)> liveOutputSources,
-        Dictionary<string, IGH_DocumentObject> liveById)
+        Dictionary<string, IGH_DocumentObject> liveById,
+        RectangleF visible)
     {
         if (liveOutputSources.Count == 0) return;
 
@@ -1600,7 +1636,7 @@ public sealed class CanvasDiffOverlay
                 {
                     if (!TryResolveLiveAnchor(liveOutputSources, src, out var srcAnchor)) continue;
                     var consumerAnchor = LiveInputAnchor(consumer, consumerInputs, i);
-                    DrawWireBezier(g, pen, srcAnchor, consumerAnchor);
+                    DrawWireBezier(g, pen, srcAnchor, consumerAnchor, visible);
                 }
             }
         }
@@ -1620,7 +1656,7 @@ public sealed class CanvasDiffOverlay
                     if (fromSet.Contains(src)) continue;
                     if (!TryResolveLiveAnchor(liveOutputSources, src, out var srcAnchor)) continue;
                     var consumerAnchor = LiveInputAnchor(consumer, consumerInputs, i);
-                    DrawWireBezier(g, pen, srcAnchor, consumerAnchor);
+                    DrawWireBezier(g, pen, srcAnchor, consumerAnchor, visible);
                 }
             }
         }
@@ -1632,9 +1668,19 @@ public sealed class CanvasDiffOverlay
     /// proportional to horizontal distance (clamped to 40px so very
     /// close ports still render as a curve, not a straight segment).
     /// </summary>
-    private static void DrawWireBezier(Graphics g, Pen pen, PointF source, PointF target)
+    private static void DrawWireBezier(Graphics g, Pen pen, PointF source, PointF target, RectangleF visible)
     {
         var bend = Math.Max(40f, Math.Abs(target.X - source.X) * 0.5f);
+
+        // The curve stays inside the convex hull of the four control
+        // points: the endpoints' Y range, widened in X by the bend.
+        var hull = RectangleF.FromLTRB(
+            Math.Min(source.X, target.X) - bend,
+            Math.Min(source.Y, target.Y) - 4f,
+            Math.Max(source.X, target.X) + bend,
+            Math.Max(source.Y, target.Y) + 4f);
+        if (!visible.IntersectsWith(hull)) return;
+
         var c1 = new PointF(source.X + bend, source.Y);
         var c2 = new PointF(target.X - bend, target.Y);
         g.DrawBezier(pen, source, c1, c2, target);
@@ -1716,18 +1762,15 @@ public sealed class CanvasDiffOverlay
         return ghostOutputAnchors.TryGetValue(sourceGuid, out anchor);
     }
 
-    private static RectangleF PaintDeletedGhost(Graphics g, CanonicalObject deleted)
+    private static RectangleF DeletedGhostRect(CanonicalObject deleted)
     {
-        RectangleF rect;
         if (deleted.Bounds is { } b && b.Width > 0 && b.Height > 0)
-        {
-            rect = new RectangleF(b.X, b.Y, b.Width, b.Height);
-        }
-        else
-        {
-            rect = new RectangleF(deleted.Pivot.X, deleted.Pivot.Y, 100f, 60f);
-        }
+            return new RectangleF(b.X, b.Y, b.Width, b.Height);
+        return new RectangleF(deleted.Pivot.X, deleted.Pivot.Y, 100f, 60f);
+    }
 
+    private static void PaintDeletedGhost(Graphics g, CanonicalObject deleted, RectangleF rect)
+    {
         g.FillRectangle(OverlayResources.RedGhostFill, rect);
         g.DrawRectangle(OverlayResources.RedGhostOutline, rect.X, rect.Y, rect.Width, rect.Height);
 
@@ -1759,8 +1802,6 @@ public sealed class CanvasDiffOverlay
                 rect.X + (rect.Width - size.Width) / 2f,
                 rect.Bottom + 2f);
         }
-
-        return rect;
     }
 
     private static void PaintDeletedSlider(Graphics g, RectangleF rect, SliderValue? sv)
