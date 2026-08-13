@@ -1336,13 +1336,14 @@ public sealed class GLoomPanel : Panel
         try
         {
             string? sha;
-            string msg;
+            string subject;
 
             // The mid-commit IsModified=false below raises ModifiedChanged,
             // which used to trigger a full tracker recompute (and a panel
             // refresh, and an overlay recompute) before the commit even ran.
             // The scope swallows all of it; its dispose performs the single
-            // post-commit recompute, so the explicit Refresh() is gone too.
+            // post-commit recompute. The dialog is modal, so holding the
+            // scope across it is safe - the user can't edit the canvas.
             using (DocumentTracker.Instance.SuspendUpdates())
             {
                 // If the canvas has unsaved edits, persist the .gh to disk first.
@@ -1372,17 +1373,59 @@ public sealed class GLoomPanel : Panel
                 var jsonFull = s.CanonicalJsonFullPath!;
                 var ghRel = Path.GetRelativePath(s.RepoPath, s.FilePath);
                 var jsonRel = Path.GetRelativePath(s.RepoPath, jsonFull);
-                // Count commits touching either file. JSON-only would miss
-                // slider-only commits (Phase 1a serializer is structural-only,
-                // so those commits don't touch the JSON), causing the message
-                // to repeat a previous version number.
-                var nextV = CommitVersioning.NextVersion(s.RepoPath, ghRel, jsonRel);
-                msg = CommitVersioning.FormatMessage(ghBase, nextV);
 
-                sha = GLoomRepository.Commit(
-                    s.RepoPath, json, jsonFull, msg,
-                    authorName: "iSamacA", authorEmail: "samaca163@gmail.com",
-                    alsoStageFullPath: s.FilePath);
+                // Stage first so a genuine no-op is caught BEFORE prompting
+                // for a message. Gate on what's actually staged, not on the
+                // canonical diff: a .gh-only change leaves the JSON identical
+                // but is still a real commit.
+                var staged = GLoomRepository.StageForCommit(
+                    s.RepoPath, json, jsonFull, alsoStageFullPath: s.FilePath);
+                if (staged.Count == 0)
+                {
+                    MessageBox.Show("Nothing to commit (no changes since last commit).",
+                        "G-Loom", MessageBoxButtons.OK, MessageBoxType.Information);
+                    return;
+                }
+
+                // Draft the dialog from the diff against this file's last
+                // committed version (file-scoped, so multi-file repos compare
+                // to the right parent). HEAD's JSON is read from git, not the
+                // working tree, so having just overwritten the working JSON
+                // doesn't matter.
+                DocumentDiff? diff = null;
+                var fromSha = GLoomRepository.GetStatus(s.RepoPath, new[] { jsonRel, ghRel }).LastCommit?.Sha;
+                if (fromSha is not null)
+                {
+                    var historicJson = GLoomRepository.ReadFileAtCommit(s.RepoPath, fromSha, jsonRel);
+                    var historicDoc = CanonicalJson.TryParse(historicJson);
+                    if (historicDoc is not null)
+                        diff = DocumentDiff.Compute(historicDoc, canonical);
+                }
+
+                var dialog = new CommitDialog(
+                    ghBase, DiffSummaryText.Headline(diff, ghBase), DiffSummaryText.Body(diff));
+                var result = dialog.ShowModal();
+                if (result is null)
+                {
+                    GLoomRepository.UnstagePaths(s.RepoPath, staged);
+                    return;
+                }
+                subject = result.Subject;
+
+                // The auto version lives in a machine-readable trailer in the
+                // body, keeping subjects human-readable; version labels
+                // resolve from either place. Count commits touching either
+                // file - JSON-only would miss slider-only commits (Phase 1a
+                // serializer is structural-only), repeating a version number.
+                var nextV = CommitVersioning.NextVersion(s.RepoPath, ghRel, jsonRel);
+                var trailer = "Gloom-Version: " + CommitVersioning.FormatMessage(ghBase, nextV);
+                var body = string.IsNullOrWhiteSpace(result.Description)
+                    ? trailer
+                    : result.Description.TrimEnd() + "\n\n" + trailer;
+
+                sha = GLoomRepository.CommitStaged(
+                    s.RepoPath, subject, body,
+                    authorName: "iSamacA", authorEmail: "samaca163@gmail.com");
             }
 
             if (sha is null)
@@ -1392,7 +1435,7 @@ public sealed class GLoomPanel : Panel
             }
             else
             {
-                RhinoApp.WriteLine($"[G-Loom] Committed {sha[..7]} ({msg})");
+                RhinoApp.WriteLine($"[G-Loom] Committed {sha[..7]} ({subject})");
             }
         }
         catch (Exception ex)
@@ -1525,6 +1568,8 @@ public sealed class GLoomPanel : Panel
                 Orientation = Orientation.Vertical,
                 Spacing = 2,
             };
+            var notes = DescriptionFromBody(info.Body);
+            if (notes.Length > 0) drawerStack.Items.Add(BuildNotesPanel(notes));
             drawerStack.Items.Add(tagsPanel);
             if (!isCurrent) drawerStack.Items.Add(diffSlot);
 
@@ -1587,6 +1632,51 @@ public sealed class GLoomPanel : Panel
             rows.Rows.Add(new TableRow(mainRow));
             rows.Rows.Add(new TableRow(details));
             Content = rows;
+        }
+
+        /// <summary>
+        /// The description the user typed at commit time, with the trailing
+        /// <c>Gloom-Version:</c> trailer paragraph stripped. Empty for commits
+        /// made before this feature (their body is the bare trailer or blank).
+        /// </summary>
+        private static string DescriptionFromBody(string? body)
+        {
+            if (string.IsNullOrWhiteSpace(body)) return "";
+            var lines = body.Replace("\r\n", "\n").Split('\n');
+            var end = lines.Length;
+            while (end > 0)
+            {
+                var line = lines[end - 1].Trim();
+                if (line.Length == 0 || line.StartsWith("Gloom-Version:", StringComparison.Ordinal))
+                    end--;
+                else
+                    break;
+            }
+            return string.Join("\n", lines.Take(end)).Trim();
+        }
+
+        private static Panel BuildNotesPanel(string text)
+        {
+            var stack = new StackLayout
+            {
+                Orientation = Orientation.Vertical,
+                Spacing = 2,
+                Padding = new Padding(20, 6, 12, 6),
+            };
+            stack.Items.Add(new Label
+            {
+                Text = "Notes",
+                Font = new Font(SystemFont.Bold, 9),
+                TextColor = Color.FromGrayscale(0.5f),
+            });
+            stack.Items.Add(new Label
+            {
+                Text = text,
+                Font = new Font(SystemFont.Default, 9),
+                TextColor = Color.FromGrayscale(0.3f),
+                Wrap = WrapMode.Word,
+            });
+            return new Panel { Content = stack };
         }
 
         private static Panel BuildDetailsPanel(
