@@ -1387,45 +1387,56 @@ public sealed class GLoomPanel : Panel
                     return;
                 }
 
-                // Draft the dialog from the diff against this file's last
-                // committed version (file-scoped, so multi-file repos compare
-                // to the right parent). HEAD's JSON is read from git, not the
-                // working tree, so having just overwritten the working JSON
-                // doesn't matter.
-                DocumentDiff? diff = null;
-                var fromSha = GLoomRepository.GetStatus(s.RepoPath, new[] { jsonRel, ghRel }).LastCommit?.Sha;
-                if (fromSha is not null)
+                // Any exit without a commit (cancel, or an exception in the
+                // draft/dialog path) must unstage - a stale staged pair would
+                // silently ride into the next commit of a DIFFERENT file in
+                // the same repo.
+                var committed = false;
+                try
                 {
-                    var historicJson = GLoomRepository.ReadFileAtCommit(s.RepoPath, fromSha, jsonRel);
-                    var historicDoc = CanonicalJson.TryParse(historicJson);
-                    if (historicDoc is not null)
-                        diff = DocumentDiff.Compute(historicDoc, canonical);
-                }
+                    // Draft the dialog from the diff against this file's last
+                    // committed version (file-scoped, so multi-file repos
+                    // compare to the right parent). HEAD's JSON is read from
+                    // git, not the working tree, so having just overwritten
+                    // the working JSON doesn't matter.
+                    DocumentDiff? diff = null;
+                    var fromSha = GLoomRepository.GetStatus(s.RepoPath, new[] { jsonRel, ghRel }).LastCommit?.Sha;
+                    if (fromSha is not null)
+                    {
+                        var historicJson = GLoomRepository.ReadFileAtCommit(s.RepoPath, fromSha, jsonRel);
+                        var historicDoc = CanonicalJson.TryParse(historicJson);
+                        if (historicDoc is not null)
+                            diff = DocumentDiff.Compute(historicDoc, canonical);
+                    }
 
-                var dialog = new CommitDialog(
-                    ghBase, DiffSummaryText.Headline(diff, ghBase), DiffSummaryText.Body(diff));
-                var result = dialog.ShowModal();
-                if (result is null)
+                    var dialog = new CommitDialog(
+                        ghBase, DiffSummaryText.Headline(diff, ghBase), DiffSummaryText.Body(diff));
+                    var result = dialog.ShowModal();
+                    if (result is null) return;
+                    subject = result.Subject;
+
+                    // The auto version lives in a machine-readable trailer in
+                    // the body, keeping subjects human-readable; version
+                    // labels resolve from either place. Count commits touching
+                    // either file - JSON-only would miss slider-only commits
+                    // (Phase 1a serializer is structural-only), repeating a
+                    // version number.
+                    var nextV = CommitVersioning.NextVersion(s.RepoPath, ghRel, jsonRel);
+                    var trailer = "Gloom-Version: " + CommitVersioning.FormatMessage(ghBase, nextV);
+                    var body = string.IsNullOrWhiteSpace(result.Description)
+                        ? trailer
+                        : result.Description.TrimEnd() + "\n\n" + trailer;
+
+                    sha = GLoomRepository.CommitStaged(
+                        s.RepoPath, subject, body,
+                        authorName: "iSamacA", authorEmail: "samaca163@gmail.com");
+                    committed = sha is not null;
+                }
+                finally
                 {
-                    GLoomRepository.UnstagePaths(s.RepoPath, staged);
-                    return;
+                    if (!committed)
+                        GLoomRepository.UnstagePaths(s.RepoPath, staged);
                 }
-                subject = result.Subject;
-
-                // The auto version lives in a machine-readable trailer in the
-                // body, keeping subjects human-readable; version labels
-                // resolve from either place. Count commits touching either
-                // file - JSON-only would miss slider-only commits (Phase 1a
-                // serializer is structural-only), repeating a version number.
-                var nextV = CommitVersioning.NextVersion(s.RepoPath, ghRel, jsonRel);
-                var trailer = "Gloom-Version: " + CommitVersioning.FormatMessage(ghBase, nextV);
-                var body = string.IsNullOrWhiteSpace(result.Description)
-                    ? trailer
-                    : result.Description.TrimEnd() + "\n\n" + trailer;
-
-                sha = GLoomRepository.CommitStaged(
-                    s.RepoPath, subject, body,
-                    authorName: "iSamacA", authorEmail: "samaca163@gmail.com");
             }
 
             if (sha is null)
