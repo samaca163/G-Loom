@@ -126,10 +126,25 @@ public sealed class DocumentTracker
             _tracker = null;
             if (--t._suspendDepth == 0)
             {
+                // The fallback must be validated against the DocumentServer:
+                // a reload inside the scope may have removed _state.Document
+                // without re-adding it (file absent on the new branch, or a
+                // failed load), and its DocumentRemoved was swallowed by the
+                // suspension - resurrecting the dead instance would pin the
+                // tracker (and Commit) to a document that no longer exists.
                 t.UpdateActive(
-                    Instances.ActiveCanvas?.Document ?? t._state.Document,
+                    Instances.ActiveCanvas?.Document ?? IfStillOpen(t._state.Document),
                     forceMatch: true);
             }
+        }
+
+        private static GH_Document? IfStillOpen(GH_Document? doc)
+        {
+            if (doc is null) return null;
+            foreach (GH_Document open in Instances.DocumentServer)
+                if (ReferenceEquals(open, doc))
+                    return doc;
+            return null;
         }
     }
 
