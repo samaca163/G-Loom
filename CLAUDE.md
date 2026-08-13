@@ -102,6 +102,20 @@ G-Loom/
 
 Tried LibGit2Sharp first; on Rhino 8 macOS its native dylib's type initializer failed in ways that resisted custom DllImportResolver, NativeLibrary preloading, GlobalSettings.NativeLibraryPath, and install-name symlinks. Shelling out to the system `git` CLI is ~50–100ms per call but rock solid. See `GLoomRepository.cs:GitBinary()` for the per-OS binary discovery; falls back to PATH if the canonical location isn't found.
 
+### Performance architecture (v0.2.0 — do not regress)
+
+Because every git call is a ~50–100ms process spawn, the whole plugin is built around *not spawning*. The v0.2.0 overhaul fixed two user-reported problems (multi-second freeze on the first edit after save/commit; canvas stutter with the overlay on) with these invariants:
+
+- **Never run git, JSON parsing, or `DocumentSerializer.Serialize` inside a paint handler.** `CanvasDiffOverlay.OnPostPaintObjects` is strictly read-only against `_cachedDiff`. Recompute is event-driven (doc `SolutionEnd` / `ObjectsAdded` / `ObjectsDeleted` / `UndoStateChanged` — the last one is the move/rename signal — plus tracker `StateChanged`), debounced to a 250ms floor via `ScheduleRecompute`, with the historic side resolved to a SHA and fetched/parsed off the UI thread (`FetchHistoric`), cached per `(repo, file, SHA)`. Failed fetches **latch off** (`_historicUnavailable`) instead of retrying on a clock. Only the live serialize + diff run on the UI thread (GH docs are UI-thread-only), outside any paint.
+- **`FindCommitMatchingWorkingTree` is 3 spawns, not O(commits).** One multi-file `git hash-object` (NOT in-process SHA-1 — git applies autocrlf/clean filters before hashing, and this repo hits that on Windows), one `git log -n200`, one `git cat-file --batch-check` in strict ping-pong (write one line, flush, read one response; batching requests up front deadlocks on the pipe buffer).
+- **`DocumentTracker` memoizes the match** behind a stat key (length + LastWriteTimeUtc of both files): `ModifiedChanged` floods never touch git because they never touch disk. `Refresh()` forces past the memo (checkouts can change history without changing bytes). `SuspendUpdates()` returns an IDisposable scope that batches compound ops (commit / restore / `ReloadAllInRepo`) into exactly one forced trailing recompute; its dispose resolves the doc from the **active canvas** (a reload replaces `_state.Document` with a dead instance).
+- **`IsRepo` is memoized per repo root** with a `.git`-marker staleness guard. It used to be a hidden spawn on every public repository method (~40% multiplier).
+- **Panel refreshes read in the background.** `GLoomPanel.RequestRefresh` snapshots `TrackedState`, runs all git reads in `ReadRepoData` on a worker (each fact fetched once — single Log window, branches threaded into `GetForkPoints`, upstream into `GetAheadBehind`), and marshals only control mutation back. Single-flight + trailing-edge rerun flag. Background code must never touch `state.Document`.
+- **Paint allocates nothing fixed.** All fonts/pens/brushes live in `OverlayResources` (process-lifetime; one shared `AdjustableArrowCap` — `Pen.Dispose` does NOT dispose a custom cap, per-frame caps leaked native handles). Live-object and wire-anchor maps rebuild per recompute, not per frame; per-frame work is O(diff items) property reads + draws, with viewport culling (generous margins; hit-test regions and wire anchors are never culled).
+- **`RunInternal` drains stdout/stderr concurrently** (two `ReadToEndAsync`; sequential ReadToEnd deadlocks when git fills the stderr pipe) with timeouts: 30s local, 120s network, process-tree kill on expiry.
+
+If a future feature needs "current commit" or repo facts on a hot path, go through the existing caches — don't add direct `Run` calls to event handlers.
+
 ## Conventions (how we write code in this project)
 
 ### Comments — the WHY, never the WHAT
@@ -141,7 +155,7 @@ The user is a designer / architect, not a software engineer. They think workflow
 For exploratory questions, respond in 2–3 sentences with a recommendation and the main tradeoff. Save longer analysis for when they explicitly ask to discuss a topic in depth (then go deep).
 
 ### Platform
-The user runs a **two-machine workflow**: develops on **macOS** (`/Users/isamaca/Tech Projects/G-Loom/`, `dotnet` at `$HOME/.dotnet/dotnet`, zsh) and tests in Rhino on **Windows** (PowerShell, `dotnet` at `C:\Program Files\dotnet\`, `git` at `C:\Program Files\Git\cmd\git.exe`). The `.gha` is cross-platform compiled, but Phase smoke-testing always happens on Windows where their production Rhino lives — so a session that ends with "let's smoke test next time" usually means the next session's first job is **deploying the .gha on Windows** via `build/deploy-local.ps1`. See `memory/user_platform.md` for paths and tooling on both sides.
+The user runs a **two-machine workflow**: develops on **macOS** (`/Users/isamaca/Tech Projects/G-Loom/`, `dotnet` at `$HOME/.dotnet/dotnet`, zsh) and tests in Rhino on **Windows** (PowerShell, `git` at `C:\Program Files\Git\cmd\git.exe`). The Windows box has .NET **runtimes** at `C:\Program Files\dotnet\` but no system-wide SDK; a user-local SDK 8 lives at `%USERPROFILE%\.dotnet\` — build with `$env:DOTNET_ROOT="$env:USERPROFILE\.dotnet"; $env:PATH="$env:USERPROFILE\.dotnet;$env:PATH"` first. The `.gha` is cross-platform compiled, but Phase smoke-testing always happens on Windows where their production Rhino lives — so a session that ends with "let's smoke test next time" usually means the next session's first job is **deploying the .gha on Windows** via `build/deploy-local.ps1`. See `memory/user_platform.md` for paths and tooling on both sides.
 
 Lockstep both deploy scripts when you change deploy logic — the user may test one side at a time but expects both to stay in sync.
 
