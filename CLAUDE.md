@@ -270,7 +270,7 @@ All optional fields with `= null` defaults; older documents parse cleanly and ol
 - **Credentials are entirely delegated to git's helpers** (Windows Credential Manager, macOS Keychain, SSH agent). No custom credential UI.
 - **Single-remote scope.** Multiple remotes still work mechanically (the menu handles N), but UX is optimized for the one-remote case the user said is dominant.
 
-### v0.2.2 — Project Root, the first canvas component
+### v0.2.2 — Project Root, the first canvas component (smoke-tested on Windows)
 
 The first `GH_Component` G-Loom has ever shipped, and the return of the `G-Loom` ribbon tab (`Components/`, `Ui/GLoomIcons.cs`, `GLoomPriorityLoad.RegisterRibbonTab`). It answers a workflow problem the panel structurally cannot: a definition that reads or writes files hard-codes one machine's folder layout, which breaks the moment a teammate clones the project. **Project Root** (tab `G-Loom` → group `Project`) outputs the repository root, so every path downstream is built relative to it.
 
@@ -278,6 +278,8 @@ The first `GH_Component` G-Loom has ever shipped, and the return of the `G-Loom`
 - Unsaved definition and not-in-a-repo are distinct, explicitly worded warnings — never a silent empty string. The component's `Message` shows the project folder name when it resolves.
 - Watches its host document's `FilePathChanged` and re-solves via `ScheduleSolution`, because Save As can move a definition into or out of a project and the path is not an input.
 - `RepoDiscovery.FindRepoRoot` grew gitlink support (`.git` as a *file*, i.e. linked worktrees and submodules) and an opt-in `allowMissingStart` that resolves a not-yet-existing path to its nearest existing ancestor. Default behaviour is unchanged, so `DocumentTracker`'s tracked-state semantics are untouched.
+
+Verified in Rhino on Windows on 2026-08-21: the ribbon tab and both marks render, and the component resolves as intended. Note this covers v0.2.2 only — the Phase 4 remotes/sync pass below is still outstanding.
 
 Adapted from a standalone `RepoRoot.cs` script the user had been running in a C# Script component. Everything that script did with reflection (reaching `Grasshopper.Instances`) and a `git rev-parse --show-toplevel` subprocess is redundant inside the plugin: G-Loom references Grasshopper directly, and `RepoDiscovery`'s filesystem walk gets the same answer with zero process spawns — which the performance architecture above requires.
 
