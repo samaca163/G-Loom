@@ -1,3 +1,5 @@
+using System;
+using GLoom.Components;
 using GLoom.Ui;
 using GLoom.Vcs;
 using Grasshopper;
@@ -11,6 +13,7 @@ public sealed class GLoomPriorityLoad : GH_AssemblyPriority
 {
     public override GH_LoadingInstruction PriorityLoad()
     {
+        RegisterRibbonTab();
         DocumentTracker.Instance.Initialize();
         CanvasDiffOverlay.Instance.Initialize();
         GLoomPanelHost.Register();
@@ -21,6 +24,23 @@ public sealed class GLoomPriorityLoad : GH_AssemblyPriority
 
         RhinoApp.WriteLine("[G-Loom] Plugin loaded.");
         return GH_LoadingInstruction.Proceed;
+    }
+
+    /// <summary>
+    /// Gives the G-Loom ribbon tab the plugin's mark. Without this Grasshopper
+    /// falls back to a generated letter tile for the category.
+    /// </summary>
+    private static void RegisterRibbonTab()
+    {
+        try
+        {
+            Instances.ComponentServer.AddCategoryIcon(GLoomComponent.Tab, GLoomIcons.Family);
+            Instances.ComponentServer.AddCategorySymbolName(GLoomComponent.Tab, 'G');
+        }
+        catch (Exception ex)
+        {
+            RhinoApp.WriteLine($"[G-Loom] Could not brand the ribbon tab: {ex.Message}");
+        }
     }
 
     private static bool _panelAutoOpened;
