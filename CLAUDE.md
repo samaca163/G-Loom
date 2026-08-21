@@ -289,10 +289,12 @@ The strategy review replaced the old Phase 5–8 order. The drivers: Grasshopper
 The user's memory under `C:\Users\samac\.claude\projects\D--Code-Projects-G-Loom\memory\` has narrower documents. This `CLAUDE.md` is the synthesis; the memory files are the receipts.
 
 - `MEMORY.md` — index, one-line hooks
-- `user_platform.md` — user is on Windows; PowerShell default; canonical Grasshopper Libraries path
+- `user_platform.md` — the two-machine workflow (dev on macOS, Rhino testing/releases on Windows); paths and tooling on both sides
+- `project_naming.md` — the G-BIM → G-Loom rename ledger; names, extensions, GUIDs, tagline
 - `feedback_panel_only_ux.md` — no ribbon components
 - `feedback_no_reflection_method_invocation.md` — properties + fields only when reflecting over GH SDK objects; method invocation broke the drawing pipeline once
 - `project_target_workflow.md` — AEC team primary, Product secondary, solo a subset of team
 - `project_recipe_versioning.md` — the thesis in detail with friction points
+- `project_strategy_2026_08.md` — the August 2026 strategy review distilled; supersedes older roadmap/priority notes
 - `project_branches_are_systems.md` — system-vocabulary rationale
 - `project_three_mode_scope.md` — the three modes, what each centers
