@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using GLoom.Ui;
 using Grasshopper.Kernel;
 
 namespace GLoom;
@@ -8,7 +9,7 @@ public sealed class GLoomAssemblyInfo : GH_AssemblyInfo
 {
     public override string Name => "G-Loom";
 
-    public override Bitmap? Icon => null;
+    public override Bitmap? Icon => GLoomIcons.Family;
 
     public override string Description =>
         "Version control for parametric Grasshopper systems. " +
