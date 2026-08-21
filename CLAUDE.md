@@ -73,19 +73,23 @@ G-Loom/
     └── GLoom.Plugin/
         ├── GLoom.Plugin.csproj   (net7.0-windows; AssemblyName=GLoom; output: GLoom.gha)
         ├── GLoomAssemblyInfo.cs  (GH_AssemblyInfo subclass — display metadata for the plugin)
-        ├── GLoomPriorityLoad.cs  (GH_AssemblyPriority — entry point, hooks canvas + auto-opens panel)
+        ├── GLoomPriorityLoad.cs  (GH_AssemblyPriority — entry point, brands the ribbon tab, hooks canvas + auto-opens panel)
+        ├── Components/
+        │   ├── GLoomComponent.cs       (base for canvas components — owns the ribbon tab + group names)
+        │   └── ProjectRootComponent.cs ("Project Root" — emits the repo root for machine-independent paths)
         ├── Serialization/
         │   ├── CanonicalJson.cs       (JsonSerializerOptions — indented, camelCase, deterministic)
         │   ├── CanonicalModels.cs     (CanonicalDocument / Object / Param / Group records, schema v1)
         │   └── DocumentSerializer.cs  (walks GH_Document → CanonicalDocument; structural-only Phase 1a)
         ├── Ui/
+        │   ├── GLoomIcons.cs          (procedurally drawn 24×24 canvas marks — the commit-graph family mark)
         │   ├── GLoomPanel.cs          (Eto.Forms panel — file/repo/branch/version metadata + commit + history list)
         │   └── GLoomPanelHost.cs      (Panels.RegisterPanel + dock-as-sibling open + runtime-rendered "G" icon)
         └── Vcs/
             ├── CommitVersioning.cs    (auto-versioned message format `<base>_V###`)
             ├── DocumentTracker.cs     (singleton tracking active GH_Document; reload-from-disk; multi-doc reload)
             ├── GLoomRepository.cs     (all git ops via shelling out to system `git`)
-            └── RepoDiscovery.cs       (walks up to find .git; computes sibling .gloom.json path)
+            └── RepoDiscovery.cs       (walks up to find a .git dir or gitlink file; computes sibling .gloom.json path)
 ```
 
 ### How the layers fit together
@@ -142,8 +146,15 @@ When designing UI flows or vocabulary around branches, use system-vocabulary ("C
 ### Scoped branches are opt-in
 Don't make scope-mandatory. "Create branch" is git-vanilla; "Create scoped branch from cut" is the power feature. Mode 3 (tool development) users will never use scope. Don't force them through it.
 
-### Don't add ribbon components
-G-Loom is panel-only. Don't introduce `GH_Component` subclasses unless the feature genuinely belongs on the canvas wire graph and the user has explicitly asked for it. Phase 0 had three diagnostic components; they're all purged. Adding components reintroduces the G-Loom ribbon tab the user explicitly asked us to remove.
+### Canvas components are the exception, not the habit
+G-Loom is panel-first. Don't introduce a `GH_Component` subclass unless the value genuinely belongs on the wire graph *and* the user has explicitly asked for it. Phase 0's three diagnostic components were all purged for failing that test.
+
+The bar was met once, in v0.2.2: **Project Root** (`Components/ProjectRootComponent.cs`) emits the repository root so definitions can build paths relative to it instead of hard-coding one machine's folder layout — a value downstream components consume, which a panel cannot supply. That brought back the `G-Loom` ribbon tab, now deliberately branded (`GLoomPriorityLoad.RegisterRibbonTab`).
+
+House rules for anything added to that tab:
+- Derive from `GLoomComponent`, which owns the tab (`G-Loom`) and group (`Project`) names. Don't hand-write category strings.
+- Icons come from `Ui/GLoomIcons.cs` — drawn, never embedded, so the `.gha` stays a single file. The family mark is a commit graph read bottom-up (two branch tips converging into one root node); a component identifies itself by how the root is filled, not by a new silhouette.
+- State that isn't an input still has to expire the component. `ProjectRootComponent` watches its host document's `FilePathChanged` and re-solves via `ScheduleSolution`, because Save As can move a definition into or out of a project and nothing else would invalidate the cached value.
 
 ## Working with the user
 
@@ -170,7 +181,7 @@ Lockstep both deploy scripts when you change deploy logic — the user may test 
 - Scoped branches + promote/refresh round-trip (designed, demoted to post-launch)
 - Roadmap order (revised 2026-08-13): de-risk/harden → assisted merge → launch (go public + Yak/food4rhino) → AI layer → element versioning/Cimbra
 - Product/venture ambition with a gated public launch (repo stays private until the Phase 7 gate)
-- Panel-only UX (no GH ribbon components)
+- Panel-first UX; canvas components only where the value belongs on the wire graph (first one: **Project Root**, v0.2.2)
 - Name: G-Loom (renamed from G-BIM)
 
 ## What's done and what's next
@@ -259,6 +270,17 @@ All optional fields with `= null` defaults; older documents parse cleanly and ol
 - **Credentials are entirely delegated to git's helpers** (Windows Credential Manager, macOS Keychain, SSH agent). No custom credential UI.
 - **Single-remote scope.** Multiple remotes still work mechanically (the menu handles N), but UX is optimized for the one-remote case the user said is dominant.
 
+### v0.2.2 — Project Root, the first canvas component
+
+The first `GH_Component` G-Loom has ever shipped, and the return of the `G-Loom` ribbon tab (`Components/`, `Ui/GLoomIcons.cs`, `GLoomPriorityLoad.RegisterRibbonTab`). It answers a workflow problem the panel structurally cannot: a definition that reads or writes files hard-codes one machine's folder layout, which breaks the moment a teammate clones the project. **Project Root** (tab `G-Loom` → group `Project`) outputs the repository root, so every path downstream is built relative to it.
+
+- Optional `Start` input pins the resolution to a given file or folder; empty resolves from the host definition's own `.gh`, walking the cluster owner chain when the component sits inside a cluster.
+- Unsaved definition and not-in-a-repo are distinct, explicitly worded warnings — never a silent empty string. The component's `Message` shows the project folder name when it resolves.
+- Watches its host document's `FilePathChanged` and re-solves via `ScheduleSolution`, because Save As can move a definition into or out of a project and the path is not an input.
+- `RepoDiscovery.FindRepoRoot` grew gitlink support (`.git` as a *file*, i.e. linked worktrees and submodules) and an opt-in `allowMissingStart` that resolves a not-yet-existing path to its nearest existing ancestor. Default behaviour is unchanged, so `DocumentTracker`'s tracked-state semantics are untouched.
+
+Adapted from a standalone `RepoRoot.cs` script the user had been running in a C# Script component. Everything that script did with reflection (reaching `Grasshopper.Instances`) and a `git rev-parse --show-toplevel` subprocess is redundant inside the plugin: G-Loom references Grasshopper directly, and `RepoDiscovery`'s filesystem walk gets the same answer with zero process spawns — which the performance architecture above requires.
+
 ### The roadmap (revised August 2026 — see docs/STRATEGY.md for the full rationale)
 
 The strategy review replaced the old Phase 5–8 order. The drivers: Grasshopper 2 entered beta inside the Rhino 9 Beta (binary `.ghz`, no `.ghx` export, GH1 plugins don't load, and McNeel hints at built-in version comparison); the category's history shows **merge is the product, diff is the demo** (Pancake's author removed his GH compare tool for exactly this reason); and McNeel's MCP server means AI agents now edit live definitions, making review/rollback/provenance machinery safety-critical.
@@ -280,7 +302,7 @@ The strategy review replaced the old Phase 5–8 order. The drivers: Grasshopper
 | Per-element display geometry (mesh for the 3D deck) | glTF keyed by element ID, pulled on demand | **DVC + Google Drive** |
 | The recipe (`.gh` + `.gloom.json`) | canonical JSON + binary | **git** (already built) |
 
-**Key insight — storage ≠ structure**: DVC+Drive stores the heavy model as one opaque md5 blob; it can return exact bytes but cannot answer element counts, areas, or what changed. The queryable structure must be a new git-lane artifact. The real unbuilt work is the **extractor** (walking elements as RiR/GH produces them); its data source is an open question — possibly new G-Loom components, which is the one place the "no ribbon components" rule is left ajar.
+**Key insight — storage ≠ structure**: DVC+Drive stores the heavy model as one opaque md5 blob; it can return exact bytes but cannot answer element counts, areas, or what changed. The queryable structure must be a new git-lane artifact. The real unbuilt work is the **extractor** (walking elements as RiR/GH produces them); its data source is an open question — possibly new G-Loom components — the ribbon tab now exists (v0.2.2), so that route is open.
 
 **Cimbra** is the sibling Rust tool (`github.com/samaca163/Cimbra`) that scaffolds an AEC project repo with the three-lane split: `Coding/` on git, `Binary/` (`.rvt`, `.3dm`, renders) on DVC→Drive, `.gloom.json` always on git. **G-Loom should assume it runs inside a Cimbra-scaffolded repo.** Neither repo has any element/metadata code yet.
 
