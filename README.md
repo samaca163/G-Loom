@@ -36,7 +36,13 @@ Branches, commits, merges, push/pull, distributed collaboration — decades of b
 
 ## Status
 
-Phases 1–4 shipped (v0.2.1): commit / log / restore with a commit dialog, branches with system-aware UX, multi-file repo isolation, tags with per-tag metadata and toolchain pinning, the on-canvas visual diff overlay (halos, ghosts, wire arrows, right-click restore, compare-against-any-commit), and remotes/push/pull with smart Sync. Currently in Phase 5 (de-risk & harden) on the road to assisted merge and public launch — see `docs/STRATEGY.md` for the full direction. Cross-platform (Windows + macOS Rhino 8). Free, MIT, open source.
+Phases 1–4 shipped (v0.2.2): commit / log / restore with a commit dialog, branches with system-aware UX, multi-file repo isolation, tags with per-tag metadata and toolchain pinning, the on-canvas visual diff overlay (halos, ghosts, wire arrows, right-click restore, compare-against-any-commit), remotes/push/pull with smart Sync, and the **Project Root** canvas component. Currently in Phase 5 (de-risk & harden) on the road to assisted merge and public launch — see `docs/STRATEGY.md` for the full direction. Cross-platform (Windows + macOS Rhino 8). Free, MIT, open source.
+
+## On the canvas
+
+G-Loom is a panel first — versioning happens there, not on the wire graph. One value does belong on the canvas, and it lives on the **G-Loom** ribbon tab:
+
+- **Project Root** (`G-Loom` → `Project`) — outputs the folder at the root of the project (the git repository) that contains the open definition. Build your file paths from it and they resolve on every machine and in every clone, instead of baking one person's `C:\Users\...` into the definition. Leave it unwired to resolve from the definition's own `.gh`, or pin it with the optional `Start` input.
 
 ## Install (from a GitHub Release)
 
@@ -100,6 +106,7 @@ Restart Rhino, open Grasshopper. The G-Loom panel auto-opens on first canvas cre
 - **Phase 2 — Tags + toolchain metadata.** *(done)* Lightweight tags for milestones (DD / CD / IFC, software releases, product cert dates). Per-tag metadata schema (submittal info, release notes, toolchain pins). Branch-base markers in history.
 - **Phase 3 — Visual diff & review.** *(done)* On-canvas diff overlay (add/remove/modify/move highlighted, per-kind ghosts, wire arrows, right-click restore), compare against any commit.
 - **Phase 4 — Team collaboration.** *(shipped in v0.2.x; smoke-test pass pending)* Remotes (add/list/remove), push/pull/fetch, smart Sync, upstream tracking.
+- **Project Root component.** *(v0.2.2)* The `G-Loom` ribbon tab's first component: the repository root as a canvas value, for definitions that build paths relative to the project.
 - **Phase 5 — De-risk & harden.** *(current)* Grasshopper 2 verification (Rhino 9 Beta); a format-adapter seam so the canonical recipe schema, diff engine, and branch model are independent of the GH1 file format; GhJSON interop; test coverage for the pure logic.
 - **Phase 6 — Assisted merge.** Three-way, on-canvas assisted merge: both branches' changes vs the merge-base rendered with the existing diff overlay; non-conflicting changes apply automatically; conflicts resolve per-component (take left / take right) using the existing restore machinery.
 - **Phase 7 — Launch.** Yak package, food4rhino listing, demo material, public repository.
