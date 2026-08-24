@@ -77,19 +77,6 @@ public sealed class ProjectRootComponent : GLoomComponent
         DA.SetData(0, root);
     }
 
-    /// <summary>
-    /// The .gh on disk that owns this component. Inside a cluster the pinged
-    /// document is the cluster's own, which has no file - the real definition
-    /// is further up the owner chain.
-    /// </summary>
-    private string? HostFilePath()
-    {
-        var doc = OnPingDocument();
-        for (var hop = 0; doc is { IsFilePathDefined: false } && hop < 16; hop++)
-            doc = doc.Owner?.OwnerDocument();
-        return doc?.IsFilePathDefined == true ? doc.FilePath : null;
-    }
-
     private GH_Document? _watched;
 
     public override void AddedToDocument(GH_Document document)
