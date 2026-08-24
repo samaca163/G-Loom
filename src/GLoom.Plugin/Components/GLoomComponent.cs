@@ -6,6 +6,7 @@ public abstract class GLoomComponent : GH_Component
 {
     public const string Tab = "G-Loom";
     public const string ProjectGroup = "Project";
+    public const string SurveyGroup = "Survey";
 
     protected GLoomComponent(string name, string nickname, string description, string group)
         : base(name, nickname, description, Tab, group) { }

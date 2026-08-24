@@ -25,9 +25,12 @@ internal static class GLoomIcons
     private static readonly Color Ink = Color.FromArgb(255, 38, 42, 38);
     private static readonly Color TipFill = Color.FromArgb(255, 242, 244, 240);
     private static readonly Color RootGreen = Color.FromArgb(255, 47, 158, 99);
+    private static readonly Color RootAmber = Color.FromArgb(255, 198, 134, 42);
 
     private static Bitmap? _projectRoot;
     private static Bitmap? _family;
+    private static Bitmap? _surveySchema;
+    private static Bitmap? _surveyClassify;
 
     /// <summary>Green root: "this is where the project begins".</summary>
     public static Bitmap ProjectRoot => _projectRoot ??= Render(RootGreen);
@@ -35,11 +38,19 @@ internal static class GLoomIcons
     /// <summary>Plain ink root: the plugin- and ribbon-tab mark.</summary>
     public static Bitmap Family => _family ??= Render(Ink);
 
-    private static Bitmap Render(Color rootFill)
+    /// <summary>Hollow amber root: the survey vocabulary, held but not yet applied.</summary>
+    public static Bitmap SurveySchema => _surveySchema ??= Render(RootAmber, hollow: true);
+
+    /// <summary>Filled amber root: the vocabulary settled onto geometry.</summary>
+    public static Bitmap SurveyClassify => _surveyClassify ??= Render(RootAmber);
+
+    // Four marks is past what root colour alone can carry at 24px, so the root gains a
+    // second axis - filled or hollow - rather than the silhouette changing per component.
+    private static Bitmap Render(Color rootFill, bool hollow = false)
     {
         try
         {
-            using var hi = RenderSupersampled(rootFill);
+            using var hi = RenderSupersampled(rootFill, hollow);
             return Downsample(hi);
         }
         catch (Exception)
@@ -50,7 +61,7 @@ internal static class GLoomIcons
         }
     }
 
-    private static Bitmap RenderSupersampled(Color rootFill)
+    private static Bitmap RenderSupersampled(Color rootFill, bool hollow)
     {
         const float k = Supersample;
         var bmp = new Bitmap(Dim * Supersample, Dim * Supersample, PixelFormat.Format32bppArgb);
@@ -72,8 +83,9 @@ internal static class GLoomIcons
         Disc(g, tip, outline, 6.6f, 4.9f, 2.15f);
         Disc(g, tip, outline, 17.4f, 4.9f, 2.15f);
 
-        using var root = new SolidBrush(rootFill);
-        Disc(g, root, outline, 12f, 19.2f, 3.4f);
+        using var root = new SolidBrush(hollow ? TipFill : rootFill);
+        using var rootEdge = new Pen(rootFill, 1.7f * k);
+        Disc(g, root, hollow ? rootEdge : outline, 12f, 19.2f, 3.4f);
 
         return bmp;
     }
