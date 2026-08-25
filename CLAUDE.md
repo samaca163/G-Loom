@@ -142,8 +142,20 @@ When designing UI flows or vocabulary around branches, use system-vocabulary ("C
 ### Scoped branches are opt-in
 Don't make scope-mandatory. "Create branch" is git-vanilla; "Create scoped branch from cut" is the power feature. Mode 3 (tool development) users will never use scope. Don't force them through it.
 
-### Don't add ribbon components
-G-Loom is panel-only. Don't introduce `GH_Component` subclasses unless the feature genuinely belongs on the canvas wire graph and the user has explicitly asked for it. Phase 0 had three diagnostic components; they're all purged. Adding components reintroduces the G-Loom ribbon tab the user explicitly asked us to remove.
+### Canvas components are the exception, not the habit
+G-Loom is panel-first. Don't introduce a `GH_Component` subclass on `main` unless the value genuinely belongs on the wire graph *and* the user has explicitly asked for it. Phase 0's three diagnostic components were all purged for failing that test.
+
+The bar has been met, but only on experiment branches — `main` ships no components and no ribbon tab. `experiment/canvas-components` holds Project Root (the first component to earn its place) and the branded `G-Loom` tab; `experiment/survey-metadata` builds on it. See *Experimental branches* below. If either is merged, bring its house rules for the tab (base class owns the group names, icons drawn never embedded, non-input state must expire the component) into this section with it.
+
+### Experimental features live on branches, not on `main`
+Decided 2026-08-24, after two side features had landed on `main` unproven. `main` is the core idea — recipe version control on the Phase 5 → 6 → 7 launch path — and must stay shippable. Anything that is not on that path goes on an `experiment/<name>` branch until it has earned a merge on its own evidence.
+
+- **`main` keeps the plain version sequence.** `v0.2.1` is the current core release. `main`'s version files move only for a core release.
+- **Experiments use SemVer pre-release identifiers naming the core version they would land as**: `v0.3.0-canvas.1`, `v0.3.0-survey.1`. SemVer orders these strictly below `v0.3.0`, which is the intended meaning — an experiment is a preview of a future core release. `gh release` recognises the form and marks it pre-release automatically. Each experiment bumps its own version files on its own branch.
+- **On merge, the experiment folds into the next core release.** The pre-release tags stay as history of what it looked like before it was proven.
+- **Grandfathered:** `v0.2.2` and `v0.2.3` predate this policy. They keep their plain names and point at commits now reachable only from experiment branches, so the existing release download links keep working. Do not retag them.
+- **An experiment that depends on another branches from it**, not from `main` (survey-metadata branches from canvas-components). Merging the dependent brings its dependency with it.
+- Rewriting `main` was safe here only because the repo is private with no forks and no collaborators; the pre-rewrite state is preserved at tag `backup/pre-branch-rework`.
 
 ## Working with the user
 
@@ -170,7 +182,8 @@ Lockstep both deploy scripts when you change deploy logic — the user may test 
 - Scoped branches + promote/refresh round-trip (designed, demoted to post-launch)
 - Roadmap order (revised 2026-08-13): de-risk/harden → assisted merge → launch (go public + Yak/food4rhino) → AI layer → element versioning/Cimbra
 - Product/venture ambition with a gated public launch (repo stays private until the Phase 7 gate)
-- Panel-only UX (no GH ribbon components)
+- Panel-first UX; canvas components only where the value belongs on the wire graph — approved and exercised on experiment branches, not yet on `main`
+- **Experimental features live on `experiment/*` branches, off `main`** (decided 2026-08-24) — see the policy under Conventions
 - Name: G-Loom (renamed from G-BIM)
 
 ## What's done and what's next
@@ -258,6 +271,17 @@ All optional fields with `= null` defaults; older documents parse cleanly and ol
 - **Pull is fast-forward-only.** Diverged branches surface a clear rejection message; real merges with on-canvas conflict UI land in **Phase 5**.
 - **Credentials are entirely delegated to git's helpers** (Windows Credential Manager, macOS Keychain, SSH agent). No custom credential UI.
 - **Single-remote scope.** Multiple remotes still work mechanically (the menu handles N), but UX is optimized for the one-remote case the user said is dominant.
+
+### Experimental branches (not on `main`)
+
+Work that exists, builds, and in one case was smoke-tested — but is not on the launch path. Each branch carries its own full `CLAUDE.md` section; this is only the pointer.
+
+| Branch | Holds | Release | Status |
+|---|---|---|---|
+| `experiment/canvas-components` | **Project Root** — the first `GH_Component`, emitting the repo root for machine-independent paths — and the branded `G-Loom` ribbon tab, `GLoomComponent` base, drawn icons (`GLoomIcons`). | `v0.2.2` | **Smoke-tested on Windows 2026-08-21.** Proven; demoted to a branch only so `main` stays panel-first until a deliberate merge decision. |
+| `experiment/survey-metadata` | **Survey Schema** + **Classify by Layer** — a layer-driven metadata container for architectural surveys (`Survey/` pure logic, `Model/ModelObjectBridge`). Branches *from* canvas-components. | `v0.2.3` (pre-release) | **Never run in Rhino.** Explicitly provisional; see that branch's `CLAUDE.md` for the six open questions. |
+
+An interactive client presentation ("the deck") is planned as a further experiment; its research and scope ladder live in the session plan that made this rework, and its only G-Loom-side piece is a future element extractor — the Phase 9 extractor, on a branch.
 
 ### The roadmap (revised August 2026 — see docs/STRATEGY.md for the full rationale)
 
