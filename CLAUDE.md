@@ -156,6 +156,16 @@ House rules for anything added to that tab:
 - Icons come from `Ui/GLoomIcons.cs` — drawn, never embedded, so the `.gha` stays a single file. The family mark is a commit graph read bottom-up (two branch tips converging into one root node); a component identifies itself by how the root is filled, not by a new silhouette.
 - State that isn't an input still has to expire the component. `ProjectRootComponent` watches its host document's `FilePathChanged` and re-solves via `ScheduleSolution`, because Save As can move a definition into or out of a project and nothing else would invalidate the cached value.
 
+### Experimental features live on branches, not on `main`
+Decided 2026-08-24, after two side features had landed on `main` unproven. `main` is the core idea — recipe version control on the Phase 5 → 6 → 7 launch path — and must stay shippable. Anything that is not on that path goes on an `experiment/<name>` branch until it has earned a merge on its own evidence.
+
+- **`main` keeps the plain version sequence.** `v0.2.1` is the current core release. `main`'s version files move only for a core release.
+- **Experiments use SemVer pre-release identifiers naming the core version they would land as**: `v0.3.0-canvas.1`, `v0.3.0-survey.1`. SemVer orders these strictly below `v0.3.0`, which is the intended meaning — an experiment is a preview of a future core release. `gh release` recognises the form and marks it pre-release automatically. Each experiment bumps its own version files on its own branch.
+- **On merge, the experiment folds into the next core release.** The pre-release tags stay as history of what it looked like before it was proven.
+- **Grandfathered:** `v0.2.2` and `v0.2.3` predate this policy. They keep their plain names and point at commits now reachable only from experiment branches, so the existing release download links keep working. Do not retag them.
+- **An experiment that depends on another branches from it**, not from `main` (survey-metadata branches from canvas-components). Merging the dependent brings its dependency with it.
+- Rewriting `main` was safe here only because the repo is private with no forks and no collaborators; the pre-rewrite state is preserved at tag `backup/pre-branch-rework`.
+
 ## Working with the user
 
 ### Communication style
@@ -182,6 +192,7 @@ Lockstep both deploy scripts when you change deploy logic — the user may test 
 - Roadmap order (revised 2026-08-13): de-risk/harden → assisted merge → launch (go public + Yak/food4rhino) → AI layer → element versioning/Cimbra
 - Product/venture ambition with a gated public launch (repo stays private until the Phase 7 gate)
 - Panel-first UX; canvas components only where the value belongs on the wire graph (first one: **Project Root**, v0.2.2)
+- **Experimental features live on `experiment/*` branches, off `main`** (decided 2026-08-24) — see the policy under Conventions
 - Name: G-Loom (renamed from G-BIM)
 
 ## What's done and what's next
@@ -282,6 +293,17 @@ The first `GH_Component` G-Loom has ever shipped, and the return of the `G-Loom`
 Verified in Rhino on Windows on 2026-08-21: the ribbon tab and both marks render, and the component resolves as intended. Note this covers v0.2.2 only — the Phase 4 remotes/sync pass below is still outstanding.
 
 Adapted from a standalone `RepoRoot.cs` script the user had been running in a C# Script component. Everything that script did with reflection (reaching `Grasshopper.Instances`) and a `git rev-parse --show-toplevel` subprocess is redundant inside the plugin: G-Loom references Grasshopper directly, and `RepoDiscovery`'s filesystem walk gets the same answer with zero process spawns — which the performance architecture above requires.
+
+### Experimental branches (this branch is one of them)
+
+Work that exists, builds, and in one case was smoke-tested — but is not on the launch path. You are reading a branch's `CLAUDE.md`, so its own feature is documented in full above; the other branch is only pointed at here.
+
+| Branch | Holds | Release | Status |
+|---|---|---|---|
+| `experiment/canvas-components` | **Project Root** — the first `GH_Component`, emitting the repo root for machine-independent paths — and the branded `G-Loom` ribbon tab, `GLoomComponent` base, drawn icons (`GLoomIcons`). | `v0.2.2` | **Smoke-tested on Windows 2026-08-21.** Proven; demoted to a branch only so `main` stays panel-first until a deliberate merge decision. |
+| `experiment/survey-metadata` | **Survey Schema** + **Classify by Layer** — a layer-driven metadata container for architectural surveys (`Survey/` pure logic, `Model/ModelObjectBridge`). Branches *from* canvas-components. | `v0.2.3` (pre-release) | **Never run in Rhino.** Explicitly provisional; see that branch's `CLAUDE.md` for the six open questions. |
+
+An interactive client presentation ("the deck") is planned as a further experiment; its research and scope ladder live in the session plan that made this rework, and its only G-Loom-side piece is a future element extractor — the Phase 9 extractor, on a branch.
 
 ### The roadmap (revised August 2026 — see docs/STRATEGY.md for the full rationale)
 
