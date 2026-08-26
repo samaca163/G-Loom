@@ -69,6 +69,8 @@ G-Loom/
 ├── build/
 │   ├── deploy-local.ps1          (Windows: builds + copies .gha to %APPDATA%\Grasshopper\Libraries\G-Loom\)
 │   └── deploy-local.sh           (macOS: builds + copies .gha to Rhino's GH plug-in folder)
+├── tests/
+│   └── GLoom.Core.Tests/         (net8.0, xunit; links the host-free sources — purity enforced by the compiler)
 └── src/
     └── GLoom.Plugin/
         ├── GLoom.Plugin.csproj   (net7.0-windows; AssemblyName=GLoom; output: GLoom.gha)
@@ -77,6 +79,12 @@ G-Loom/
         ├── Components/
         │   ├── GLoomComponent.cs       (base for canvas components — owns the ribbon tab + group names)
         │   └── ProjectRootComponent.cs ("Project Root" — emits the repo root for machine-independent paths)
+        ├── Mcp/                        (the agent-facing endpoint — see the experiment/mcp section)     [v0.3.0-mcp.1]
+        │   ├── McpService.cs           (owns mode, token, listener, endpoint file; the only host-bound entry point)
+        │   ├── Protocol/               (pure: JsonRpc, ToolSchema, McpDispatcher — the MCP method surface)
+        │   ├── State/                  (pure: McpPaths, McpSettings, McpToken, EndpointFile — per-user files)
+        │   ├── Host/                   (McpHttpHost on HttpListener; UiThread — the one listener→UI bridge)
+        │   └── Tools/Memory/           (pure: gloom_status, gloom_history over GLoomRepository)
         ├── Serialization/
         │   ├── CanonicalJson.cs       (JsonSerializerOptions — indented, camelCase, deterministic)
         │   ├── CanonicalModels.cs     (CanonicalDocument / Object / Param / Group records, schema v1)
@@ -86,8 +94,10 @@ G-Loom/
         │   ├── GLoomPanel.cs          (Eto.Forms panel — file/repo/branch/version metadata + commit + history list)
         │   └── GLoomPanelHost.cs      (Panels.RegisterPanel + dock-as-sibling open + runtime-rendered "G" icon)
         └── Vcs/
+            ├── CommitTrailers.cs      (git-trailer parse/append — the `Gloom-*` provenance keys)
             ├── CommitVersioning.cs    (auto-versioned message format `<base>_V###`)
             ├── DocumentTracker.cs     (singleton tracking active GH_Document; reload-from-disk; multi-doc reload)
+            ├── GLoomLog.cs            (the log seam host-free code writes through; the plugin points it at RhinoApp)
             ├── GLoomRepository.cs     (all git ops via shelling out to system `git`)
             └── RepoDiscovery.cs       (walks up to find a .git dir or gitlink file; computes sibling .gloom.json path)
 ```
@@ -193,6 +203,7 @@ Lockstep both deploy scripts when you change deploy logic — the user may test 
 - Product/venture ambition with a gated public launch (repo stays private until the Phase 7 gate)
 - Panel-first UX; canvas components only where the value belongs on the wire graph (first one: **Project Root**, v0.2.2)
 - **Experimental features live on `experiment/*` branches, off `main`** (decided 2026-08-24) — see the policy under Conventions
+- **The MCP experiment** (decided 2026-08-26): G-Loom hosts an MCP endpoint for coding agents; live authoring is delegated to McNeel's official Rhino MCP; G-Loom owns memory, diff, restore, provenance, catalogue; skills live in `agent/gloom/`; the Revit load gate runs early
 - Name: G-Loom (renamed from G-BIM)
 
 ## What's done and what's next
@@ -294,6 +305,43 @@ Verified in Rhino on Windows on 2026-08-21: the ribbon tab and both marks render
 
 Adapted from a standalone `RepoRoot.cs` script the user had been running in a C# Script component. Everything that script did with reflection (reaching `Grasshopper.Instances`) and a `git rev-parse --show-toplevel` subprocess is redundant inside the plugin: G-Loom references Grasshopper directly, and `RepoDiscovery`'s filesystem walk gets the same answer with zero process spawns — which the performance architecture above requires.
 
+### experiment/mcp — G-Loom as an MCP server (v0.3.0-mcp.1, increment 1 of 8)
+
+**Status: increment 1 built and unit-tested on macOS (real sockets, no Rhino); the Windows smoke test and the Revit load gate are the next steps.** Branches from `experiment/canvas-components`. The full plan, catalogue and execution protocol live in the session plan that created the branch; this section is the in-repo summary.
+
+**The idea.** Coding-agent sessions (Claude Code first; Cursor and Codex later) read, understand and operate Rhino / Grasshopper / Revit / Rhino.Inside.Revit *through G-Loom*: the project's version history is the record of design decisions, a previous version of a definition is readable and restorable (whole or per component), an agent's edits get a checkpoint before and a diffable, revertible, attributed commit after. It is the "AI era" leg of `docs/STRATEGY.md` built early, as an experiment, off the launch path.
+
+**Decisions taken with the user (2026-08-26) — do not re-litigate:**
+
+- **Delegate live authoring to McNeel's official `Rhino-MCP-Platform`** (Yak, MIT; `search/describe/place/connect/apply_graph/solve` for GH1 and GH2, Rhino doc ops, `run_python`/`run_csharp`). The two servers sit side by side in `.mcp.json`. G-Loom owns only what nobody else has: history, diff, decision record, restore from history, provenance, the installed-component catalogue, value edits, solve + read outputs, screenshots. Never arbitrary code execution, `clear_canvas`, branch/tag delete, push.
+- **No MCP SDK inside the `.gha`.** `ModelContextProtocol` has no `net7.0` asset and drags `System.Text.Json ≥ 10` into Rhino's single load context beside its in-box STJ 7/8 (no per-plugin AssemblyLoadContext; RH-80178) — the `FileLoadException` class documented on Discourse, and worse inside Revit. Same story as LibGit2Sharp. The protocol layer is hand-rolled on `System.Net.HttpListener` + in-box `System.Text.Json`: zero NuGet, single-file `.gha`, same code on Rhino 8 / 9 / inside Revit. Kill criterion: the hand-rolled layer passes ~1,500 lines or breaks under two consecutive Claude Code releases → an out-of-process `net8.0` sidecar with the official SDK.
+- **Off by default.** A `.gha` cannot register Rhino commands, so the switch is the panel's `Agent access:` row — `Off / Read-only / Read-write`, persisted per user in `<appdata>/G-Loom/mcp/settings.json`, plus `Copy connect command` (the `claude mcp add --transport http gloom … --header "Authorization: Bearer …"` line). Access is gated at call time with a plain-text tool error, so `tools/list` is the same in every mode and an agent can still plan.
+- **Loopback only, `Origin` checked (403), bearer token on every request** (per-user, persistent across restarts — the rebuild loop restarts Rhino constantly). Port probe from **27180** (10500 is McNeel's, 26929 Cordyceps). An endpoint file per pid under `<appdata>/G-Loom/mcp/endpoints/` (refreshed every 15 s, removed on `RhinoApp.Closing`; readers drop files older than 60 s) is how scripts and a second Rhino are discovered.
+- **Protocol era.** Spec revisions 2025-03-26 … 2025-11-25 — the `initialize` handshake every client speaks. JSON-only responses (no SSE, no sessions; GET → 405, notifications → 202). The 2026-07-28 revision (no `initialize`, `server/discover`, no `ping`) is real; Claude Code's v2 runtime *asks* HTTP servers for it and otherwise connects the old way, so the modern era is hardening work (increment 7), not a blocker.
+- **Threading.** `Mcp/Host/UiThread.Run` is the only bridge from a listener thread to the UI thread: `RhinoApp.InvokeOnUiThread` + `TaskCompletionSource` + timeout (30 s; a timed-out action is also abandoned so it cannot run late). The listener never blocks the UI thread; the UI never waits on the listener. Host-free tools (git, JSON, diff) run on the request thread, one tool call at a time; anything touching `GH_Document`, `Instances`, the canvas or Eto goes through `UiThread`. Never call `DocumentTracker.Refresh()` off-thread. Agent solves use `GH_SolutionMode.CommandLine`.
+- **Purity is enforced by the compiler.** `Mcp/Protocol`, `Mcp/State`, `Mcp/Tools/Memory`, `Mcp/Host/McpHttpHost.cs` and the `Vcs`/`Serialization` sources they use are linked into `tests/GLoom.Core.Tests` (plain `net8.0`, no `ProjectReference`); add a `using Rhino` to any of them and the tests stop compiling. `Vcs/GLoomLog.cs` exists because `GLoomRepository` had exactly two `RhinoApp.WriteLine` calls in its way.
+- **Commits stay the human's.** Author from `git config`; the agent is named in trailers (`Gloom-Agent`, `Gloom-Agent-Session`, `Gloom-Intent`, `Gloom-Checkpoint-Base`) parsed by `Vcs/CommitTrailers.cs`. (Increment 4.)
+
+**Deviations from the session plan, all deliberate:** mode persisted in G-Loom's own `settings.json` rather than `Grasshopper.Instances.Settings`; endpoint files under `mcp/endpoints/`; no `Mcp-Session-Id` (optional in the spec, and the server is stateless); protocol revisions 2025-06-18 + 2025-11-25 only, because 2025-03-26 made JSON-RPC batching a MUST; `Vcs/ToolchainSnapshot.cs` is not linked into the tests because it names `RhinoApp.Version` — increment 2's `gloom_toolchain` will need a `GLoomLog`-style seam there first.
+
+**What exists (increment 1):** `Mcp/Protocol` (JSON-RPC parse/build, tool contracts with a small schema builder, the dispatcher), `Mcp/State`, `Mcp/Host/McpHttpHost` + `UiThread`, `McpService` (started from `PriorityLoad`), the panel row, and two tools — **`gloom_status`** (project root, branch, last commit, the commit the working file matches, unsaved edits) and **`gloom_history`** (commits newest first with version labels, descriptions and trailers). 51 tests. *Deferred from the increment-1 scope on purpose:* writing `.mcp.json` into the project, which belongs with the `agent/gloom/` plugin (increment 5) where `${GLOOM_MCP_TOKEN}` is documented.
+
+**The ladder** (each rung is a pre-release `v0.3.0-mcp.N`; time-box for 0–2 is two sessions, then the branch pauses rather than delaying assisted merge):
+
+| # | Scope | Exit |
+|---|---|---|
+| 1 | transport proof: endpoint, panel row, `gloom_status`, `gloom_history` | `claude mcp add …`; `/mcp` connected; a real history answered; foreign `Origin` → 403; a call during a solve returns after it; a second Rhino takes 27181 |
+| 1b | **Revit load gate, zero code**: open Revit → RiR → GH; `[G-Loom] MCP listening` in the command line; `ping` served | recorded here either way; failure cancels rung 8 only |
+| 2 | memory lane: `read_version` (paged), `diff`, `explain_changes`, `branches/tags/toolchain`, `decision_record`, resources, 2 prompts | unit tests; `@gloom:` works; `gloom_diff` matches the panel drawer |
+| 3 | live read via `UiThread`: documents, `read_document` (+ runtime sidecar), `read_outputs`, `solve`, catalogue (`ObjectProxies` + `CreateInstance`), `canvas_image` (`GetCanvasScreenBuffer`), `rhino_context` | error component reported; a call with a modal open times out cleanly; screenshot has ink |
+| 4 | provenance + restore: lift `Restore/DocumentRestore.cs` from the overlay, `Vcs/CommitWorkflow.cs` + `Identity.cs` from the panel; envelope (`begin_edit` checkpoint → overlay at that SHA → `end_edit` commit with trailers); `commit`, `restore_file`, `restore_objects`, `set_value` | panel regressions clean; an edit through McNeel's server inside an envelope yields checkpoint + trailers + right-click reject |
+| 5 | `agent/gloom/` Claude Code plugin: `.mcp.json` (both servers) + skills `gloom-project-memory`, `grasshopper-docs` (fetch single pages on demand — the site's ToS forbids crawling; `gloom_catalogue` first for anything installed), `gloom-plugin-dev` | fresh session installs it and reviews an agent edit end to end |
+| 6 | dev loop, script-owned (a rebuild kills the in-`.gha` server): `build/rhino-restart.ps1`, `gloom_host_exit`, `tests/GLoom.Mcp.Live` + fixtures | unattended loop passes twice |
+| 7 | hardening: modern protocol era, progress on long solves, size caps, Cursor/Codex, optional stdio bridge | all three clients connect |
+| 8 | Revit satellite (only if 1b passed): read-only Revit context/query via RiR's `ActivationGate` / an `ExternalEvent` made at load; never raise-and-wait from inside a GH solve | served inside Revit during a solve, no deadlock |
+
+**Smoke-test recipe (Windows):** close Rhino → `build/deploy-local.ps1` → open a definition inside a G-Loom repo → panel `Agent access:` → `Read-only` → `Copy connect command` → paste in a terminal → `claude` → `/mcp` shows `gloom` connected → "what's the history of this definition?" → then `curl -X POST http://localhost:27180/mcp -H "Origin: http://evil.example" …` must return 403, and on macOS both `http://localhost:…` and `http://127.0.0.1:…` must answer `ping` (the managed listener binds one address per prefix host, so both are registered; `[::1]` prefixes are rejected by it and are not served).
+
 ### Experimental branches (this branch is one of them)
 
 Work that exists, builds, and in one case was smoke-tested — but is not on the launch path. You are reading a branch's `CLAUDE.md`, so its own feature is documented in full above; the other branch is only pointed at here.
@@ -301,7 +349,8 @@ Work that exists, builds, and in one case was smoke-tested — but is not on the
 | Branch | Holds | Release | Status |
 |---|---|---|---|
 | `experiment/canvas-components` | **Project Root** — the first `GH_Component`, emitting the repo root for machine-independent paths — and the branded `G-Loom` ribbon tab, `GLoomComponent` base, drawn icons (`GLoomIcons`). | `v0.2.2` | **Smoke-tested on Windows 2026-08-21.** Proven; demoted to a branch only so `main` stays panel-first until a deliberate merge decision. |
-| `experiment/survey-metadata` | **Survey Schema** + **Classify by Layer** — a layer-driven metadata container for architectural surveys (`Survey/` pure logic, `Model/ModelObjectBridge`). Branches *from* canvas-components. | `v0.2.3` (pre-release) | **Never run in Rhino.** Explicitly provisional; see that branch's `CLAUDE.md` for the six open questions. |
+| `experiment/survey-metadata` | **Survey Schema** + **Classify by Layer** — a layer-driven metadata container for architectural surveys (`Survey/` pure logic, `Model/ModelObjectBridge`). Branches *from* canvas-components. | `v0.2.3` (pre-release) | **First run in Rhino (macOS) 2026-08-26** answered its first three open questions; still provisional; see that branch's `CLAUDE.md`. |
+| `experiment/mcp` | **The MCP endpoint** — G-Loom as the memory / provenance / review layer for coding agents (`Mcp/`, `Vcs/CommitTrailers`, `Vcs/GLoomLog`, `tests/GLoom.Core.Tests`). Branches *from* canvas-components. | `v0.3.0-mcp.1` (pre-release) | **Increment 1 built + unit-tested on macOS; Windows smoke test pending.** See the section above. |
 
 An interactive client presentation ("the deck") is planned as a further experiment; its research and scope ladder live in the session plan that made this rework, and its only G-Loom-side piece is a future element extractor — the Phase 9 extractor, on a branch.
 
