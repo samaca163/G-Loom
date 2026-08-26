@@ -853,7 +853,7 @@ public static class GLoomRepository
                 {
                     if (budget.ElapsedMilliseconds > 15_000)
                     {
-                        Rhino.RhinoApp.WriteLine("[G-Loom] cat-file match walk exceeded 15s; giving up.");
+                        GLoomLog.Write("[G-Loom] cat-file match walk exceeded 15s; giving up.");
                         return null;
                     }
 
@@ -1045,7 +1045,7 @@ public static class GLoomRepository
             {
                 try { proc.Kill(entireProcessTree: true); } catch { }
                 System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] { stdout, stderr }, 2000);
-                Rhino.RhinoApp.WriteLine(
+                GLoomLog.Write(
                     $"[G-Loom] git {(args.Length > 0 ? args[0] : "?")} timed out after {timeoutMs / 1000}s and was killed.");
                 return new ProcResult(-1, SafeResult(stdout), SafeResult(stderr));
             }

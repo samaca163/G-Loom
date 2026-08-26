@@ -13,6 +13,7 @@ public sealed class GLoomPriorityLoad : GH_AssemblyPriority
 {
     public override GH_LoadingInstruction PriorityLoad()
     {
+        GLoomLog.Sink = RhinoApp.WriteLine;
         RegisterRibbonTab();
         DocumentTracker.Instance.Initialize();
         CanvasDiffOverlay.Instance.Initialize();
