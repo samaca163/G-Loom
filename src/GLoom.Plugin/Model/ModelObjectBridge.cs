@@ -18,6 +18,21 @@ namespace GLoom.Model;
 /// binding is by simple name, so touching one compiles cleanly and then throws on a
 /// Rhino that predates it.
 /// </summary>
+/// <summary>Which route produced a layer path. See <see cref="ModelObjectBridge.LayerPathOf"/>.</summary>
+internal enum LayerReadSource
+{
+    /// <summary>No layer by either route - the input was plain geometry, not a document object.</summary>
+    None,
+
+    /// <summary>The direct route, <c>ModelObject.Layer</c>.</summary>
+    Model,
+
+    /// <summary>The fallback route, through the active document's object and layer tables.</summary>
+    Document,
+}
+
+internal readonly record struct LayerRead(string? Path, LayerReadSource Source);
+
 internal static class ModelObjectBridge
 {
     /// <summary>
@@ -48,12 +63,35 @@ internal static class ModelObjectBridge
     }
 
     /// <summary>
-    /// The object's layer as a full path. Null when the model object carries no layer -
-    /// which is what happens when the input was fed plain geometry rather than a
-    /// document object, and is worth reporting rather than silently classifying as
-    /// unmapped.
+    /// The object's layer as a full path, and which of the two routes produced it.
+    ///
+    /// <see cref="ModelObject.Layer"/> is the direct route and the one worth having, but
+    /// it is unverified against a running Rhino and it is the single point on which the
+    /// whole classification rests - a null there classifies every object as unmapped. So
+    /// the document route (id -&gt; object -&gt; attributes -&gt; layer table) backs it up.
+    /// That route is the fully-verified one; it costs a table lookup per object, which is
+    /// why it is the fallback rather than the primary.
+    ///
+    /// The source travels with the path so the caller can report which route ran. Silently
+    /// falling back would work and teach nothing, and knowing whether the direct route
+    /// holds is the difference between keeping this code and deleting half of it.
+    ///
+    /// <see cref="LayerReadSource.None"/> means the object carries no layer by either
+    /// route - what happens when the input was fed plain geometry rather than a document
+    /// object, and worth reporting rather than silently classifying as unmapped.
     /// </summary>
-    public static string? LayerPathOf(ModelObject? model)
+    public static LayerRead LayerPathOf(ModelObject? model)
+    {
+        var direct = LayerPathFromModel(model);
+        if (direct is not null) return new LayerRead(direct, LayerReadSource.Model);
+
+        var viaDocument = LayerPathFromDocument(IdOf(model));
+        if (viaDocument is not null) return new LayerRead(viaDocument, LayerReadSource.Document);
+
+        return new LayerRead(null, LayerReadSource.None);
+    }
+
+    private static string? LayerPathFromModel(ModelObject? model)
     {
         try
         {
@@ -67,6 +105,36 @@ internal static class ModelObjectBridge
 
             string name = layer.Name;
             return string.IsNullOrWhiteSpace(name) ? null : name;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The layer full path read the long way round, through the active document's tables.
+    /// Only resolves objects that live in the active document - a model object from a
+    /// linked or worksession file has an id the active document cannot find, and comes
+    /// back null rather than wrong.
+    /// </summary>
+    private static string? LayerPathFromDocument(Guid? id)
+    {
+        if (id is null || id.Value == Guid.Empty) return null;
+
+        try
+        {
+            var doc = Rhino.RhinoDoc.ActiveDoc;
+            if (doc is null) return null;
+
+            var found = doc.Objects.FindId(id.Value);
+            if (found is null) return null;
+
+            // FindIndex rather than the indexer: a deleted layer leaves attributes holding
+            // an index the table no longer has, and the indexer throws where this returns null.
+            var layer = doc.Layers.FindIndex(found.Attributes.LayerIndex);
+            var path = layer?.FullPath;
+            return string.IsNullOrWhiteSpace(path) ? null : path;
         }
         catch (Exception)
         {

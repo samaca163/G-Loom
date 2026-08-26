@@ -117,19 +117,21 @@ public sealed class ClassifyByLayerComponent : GLoomComponent
         var root = DA.ParameterTargetPath(0);
         var branch = 0;
         var noAttributes = 0;
+        var viaDocument = 0;
 
         foreach (var model in models)
         {
             if (model is null) continue;
 
-            var layer = ModelObjectBridge.LayerPathOf(model);
-            if (layer is null) noAttributes++;
+            var read = ModelObjectBridge.LayerPathOf(model);
+            if (read.Source == LayerReadSource.None) noAttributes++;
+            else if (read.Source == LayerReadSource.Document) viaDocument++;
 
-            var match = loaded.Matcher.Match(layer);
+            var match = loaded.Matcher.Match(read.Path);
             if (match is null)
             {
                 unmapped.Add(model);
-                var where = LayerPath.Normalize(layer);
+                var where = LayerPath.Normalize(read.Path);
                 unmappedLayers.TryGetValue(where, out var seen);
                 unmappedLayers[where] = seen + 1;
                 continue;
@@ -151,7 +153,7 @@ public sealed class ClassifyByLayerComponent : GLoomComponent
             }
         }
 
-        Report(unmappedLayers, noAttributes, strict);
+        Report(unmappedLayers, noAttributes, viaDocument, strict);
         Message = unmappedLayers.Count == 0
             ? $"{branch} classified"
             : $"{branch} classified · {unmapped.Count} unmapped";
@@ -164,8 +166,16 @@ public sealed class ClassifyByLayerComponent : GLoomComponent
         DA.SetDataList(5, unmapped);
     }
 
-    private void Report(SortedDictionary<string, int> unmappedLayers, int noAttributes, bool strict)
+    private void Report(SortedDictionary<string, int> unmappedLayers, int noAttributes, int viaDocument, bool strict)
     {
+        // Not a problem, and the reason it is said out loud anyway: ModelObject.Layer is
+        // the route this component is built on and it has never been verified against a
+        // running Rhino. A remark on every object is that verification.
+        if (viaDocument > 0)
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
+                $"{viaDocument} object(s) read their layer through the document rather than from the object " +
+                "itself. Classification is unaffected; it costs one layer-table lookup each.");
+
         if (noAttributes > 0)
             AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
                 $"{noAttributes} object(s) carried no layer. Feed this component from Query Model Objects rather " +
