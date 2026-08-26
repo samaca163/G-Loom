@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Plain net8.0, not the plugin's net7.0-windows. Everything linked below must be
+         host-free: no Rhino, no Grasshopper, no WinForms. If this project stops building,
+         something impure was added to a file that the MCP layer and the tests rely on
+         being pure. -->
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Sources are linked, not project-referenced: a ProjectReference would drag in the
+         Grasshopper package and the whole Rhino host surface, defeating the check above. -->
+    <Compile Include="../../src/GLoom.Plugin/Serialization/CanonicalJson.cs" LinkBase="Serialization" />
+    <Compile Include="../../src/GLoom.Plugin/Serialization/CanonicalModels.cs" LinkBase="Serialization" />
+    <Compile Include="../../src/GLoom.Plugin/Serialization/DocumentDiff.cs" LinkBase="Serialization" />
+    <Compile Include="../../src/GLoom.Plugin/Serialization/DiffSummaryText.cs" LinkBase="Serialization" />
+    <Compile Include="../../src/GLoom.Plugin/Serialization/TagMetadata.cs" LinkBase="Serialization" />
+    <Compile Include="../../src/GLoom.Plugin/Vcs/CommitVersioning.cs" LinkBase="Vcs" />
+    <Compile Include="../../src/GLoom.Plugin/Vcs/GLoomLog.cs" LinkBase="Vcs" />
+    <Compile Include="../../src/GLoom.Plugin/Vcs/GLoomRepository.cs" LinkBase="Vcs" />
+    <Compile Include="../../src/GLoom.Plugin/Vcs/RepoDiscovery.cs" LinkBase="Vcs" />
+    <Compile Include="../../src/GLoom.Plugin/Mcp/Protocol/**/*.cs" LinkBase="Mcp/Protocol" />
+    <Compile Include="../../src/GLoom.Plugin/Mcp/Tools/Memory/**/*.cs" LinkBase="Mcp/Tools/Memory" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+</Project>
