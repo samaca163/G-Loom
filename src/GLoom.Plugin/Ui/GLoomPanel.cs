@@ -4,6 +4,9 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using Eto.Drawing;
+using GLoom.Mcp;
+using GLoom.Mcp.Protocol;
+using GLoom.Mcp.State;
 using GLoom.Serialization;
 using GLoom.Vcs;
 using Grasshopper.Kernel;
@@ -15,6 +18,7 @@ using Application = Eto.Forms.Application;
 using Button = Eto.Forms.Button;
 using ButtonMenuItem = Eto.Forms.ButtonMenuItem;
 using CheckBox = Eto.Forms.CheckBox;
+using Clipboard = Eto.Forms.Clipboard;
 using Color = Eto.Drawing.Color;
 using ContextMenu = Eto.Forms.ContextMenu;
 using Control = Eto.Forms.Control;
@@ -57,6 +61,7 @@ public sealed class GLoomPanel : Panel
     private readonly Button _remoteButton = new() { Text = "-" };
     private readonly Label _syncStatusLabel = NewValueLabel();
     private readonly Button _syncButton = new() { Text = "Sync" };
+    private readonly Button _agentButton = new() { Text = "Off  ▼" };
     private readonly Label _currentVersionLabel = NewValueLabel();
     private readonly Label _lastCommitLabel = NewValueLabel();
     private readonly Label _nextVersionLabel = NewValueLabel();
@@ -73,6 +78,8 @@ public sealed class GLoomPanel : Panel
     private readonly Button _overlayRefResetBtn = new() { Text = "Reset", Visible = false };
     private ContextMenu? _branchMenu;
     private ContextMenu? _remoteMenu;
+    private ContextMenu? _agentMenu;
+    private readonly Action _onMcpChanged;
 
     // History list
     private readonly Label _historyHeaderLabel = new() { Text = "History" };
@@ -104,6 +111,14 @@ public sealed class GLoomPanel : Panel
         _branchButton.Click += (_, _) => _branchMenu?.Show(_branchButton);
         _remoteButton.Click += (_, _) => _remoteMenu?.Show(_remoteButton);
         _syncButton.Click += (_, _) => OnSyncClicked();
+        _agentButton.Click += (_, _) => { BuildAgentMenu(); _agentMenu?.Show(_agentButton); };
+        _onMcpChanged = () =>
+        {
+            try { Application.Instance.AsyncInvoke(RenderAgentRow); }
+            catch { /* not yet attached to an Eto loop */ }
+        };
+        McpService.Changed += _onMcpChanged;
+        RenderAgentRow();
 
         // Two-way binding with the overlay singleton: clicking the box
         // toggles the overlay; the overlay raising EnabledChanged
@@ -182,6 +197,7 @@ public sealed class GLoomPanel : Panel
                 LabelRow("Branch:",          _branchButton),
                 LabelRow("Remote:",          _remoteButton),
                 LabelRow("Sync:",            BuildSyncRow()),
+                LabelRow("Agent access:",    _agentButton),
                 LabelRow("Current version:", _currentVersionLabel),
                 LabelRow("Last commit:",     _lastCommitLabel),
                 LabelRow("Next version:",    _nextVersionLabel),
@@ -236,6 +252,88 @@ public sealed class GLoomPanel : Panel
                 new StackLayoutItem(_syncButton),
             },
         };
+    }
+
+    // ---- agent access (MCP) ------------------------------------------
+
+    // Independent of the tracked document: the endpoint belongs to this Rhino, not to a
+    // file, so the row never goes through RequestRefresh.
+    // Rhino creates a panel instance per container (and per document on macOS); a
+    // disposed one must stop listening or it re-renders a dead button on every switch.
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) McpService.Changed -= _onMcpChanged;
+        base.Dispose(disposing);
+    }
+
+    private void RenderAgentRow()
+    {
+        if (_agentButton.IsDisposed) return;
+        var mode = McpService.Access switch
+        {
+            AgentAccess.ReadOnly => "Read-only",
+            AgentAccess.ReadWrite => "Read-write",
+            _ => "Off",
+        };
+        var where = McpService.Access == AgentAccess.Off ? ""
+            : McpService.IsRunning ? $" · localhost:{new Uri(McpService.Url!).Port}"
+            : " · unavailable";
+        _agentButton.Text = $"{mode}{where}  ▼";
+    }
+
+    private void BuildAgentMenu()
+    {
+        var menu = new ContextMenu();
+        foreach (var (label, access) in new[]
+        {
+            ("Off", AgentAccess.Off),
+            ("Read-only", AgentAccess.ReadOnly),
+            ("Read-write", AgentAccess.ReadWrite),
+        })
+        {
+            var current = McpService.Access == access;
+            var item = new ButtonMenuItem { Text = (current ? "✓ " : "   ") + label };
+            var a = access;
+            item.Click += (_, _) => McpService.SetAccess(a);
+            menu.Items.Add(item);
+        }
+
+        menu.Items.Add(new SeparatorMenuItem());
+
+        var command = McpService.ConnectCommand;
+        var copy = new ButtonMenuItem
+        {
+            Text = command is null ? "Copy connect command (turn agent access on first)" : "Copy connect command (Claude Code)",
+            Enabled = command is not null,
+        };
+        copy.Click += (_, _) => CopyToClipboard(command!, $"Connect command for {McpService.Url} copied. Paste it in a terminal, then use /mcp in Claude Code.");
+        menu.Items.Add(copy);
+
+        var status = new ButtonMenuItem { Text = "Status..." };
+        status.Click += (_, _) => MessageBox.Show(
+            $"Agent access: {McpSettings.Label(McpService.Access)}\n" +
+            $"Endpoint: {(McpService.IsRunning ? McpService.Url : "not running")}\n" +
+            (McpService.LastError is null ? "" : $"Last error: {McpService.LastError}\n") +
+            $"Token file: {McpPaths.TokenFile}\n" +
+            $"Endpoint files: {McpPaths.EndpointsDir}",
+            "G-Loom: Agent access", MessageBoxButtons.OK, MessageBoxType.Information);
+        menu.Items.Add(status);
+
+        _agentMenu = menu;
+    }
+
+    private static void CopyToClipboard(string text, string confirmation)
+    {
+        try
+        {
+            new Clipboard { Text = text }.Dispose();
+            RhinoApp.WriteLine("[G-Loom] " + confirmation);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Could not copy to the clipboard: {ex.Message}\n\n{text}",
+                "G-Loom", MessageBoxButtons.OK, MessageBoxType.Warning);
+        }
     }
 
     private TableLayout BuildOverlayFilters()

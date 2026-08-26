@@ -1,5 +1,6 @@
 using System;
 using GLoom.Components;
+using GLoom.Mcp;
 using GLoom.Ui;
 using GLoom.Vcs;
 using Grasshopper;
@@ -17,6 +18,9 @@ public sealed class GLoomPriorityLoad : GH_AssemblyPriority
         RegisterRibbonTab();
         DocumentTracker.Instance.Initialize();
         CanvasDiffOverlay.Instance.Initialize();
+        // Before the panel: Rhino may construct it while restoring a layout, and its
+        // Agent access row reads the service's state at construction.
+        McpService.Initialize();
         GLoomPanelHost.Register();
 
         Instances.CanvasCreated += OnCanvasCreated;
