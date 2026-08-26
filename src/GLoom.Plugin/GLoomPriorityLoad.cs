@@ -34,7 +34,11 @@ public sealed class GLoomPriorityLoad : GH_AssemblyPriority
     {
         try
         {
-            Instances.ComponentServer.AddCategoryIcon(GLoomComponent.Tab, GLoomIcons.Family);
+            // The symbol name is registered either way: it is what Grasshopper falls back
+            // to when the mark could not be drawn, and it is the only branding left then.
+            var mark = GLoomIcons.Family;
+            if (mark is not null)
+                Instances.ComponentServer.AddCategoryIcon(GLoomComponent.Tab, mark);
             Instances.ComponentServer.AddCategorySymbolName(GLoomComponent.Tab, 'G');
         }
         catch (Exception ex)

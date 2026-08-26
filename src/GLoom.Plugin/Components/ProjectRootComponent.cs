@@ -28,7 +28,7 @@ public sealed class ProjectRootComponent : GLoomComponent
     public override IEnumerable<string> Keywords =>
         new[] { "gloom", "git", "repo", "repository", "root", "project", "folder", "path" };
 
-    protected override Bitmap Icon => GLoomIcons.ProjectRoot;
+    protected override Bitmap? Icon => GLoomIcons.ProjectRoot;
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
     {

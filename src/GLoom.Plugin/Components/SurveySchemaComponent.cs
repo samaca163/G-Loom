@@ -29,7 +29,7 @@ public sealed class SurveySchemaComponent : GLoomComponent
     public override IEnumerable<string> Keywords =>
         new[] { "gloom", "survey", "schema", "categories", "levantamiento", "bim", "revit" };
 
-    protected override Bitmap Icon => GLoomIcons.SurveySchema;
+    protected override Bitmap? Icon => GLoomIcons.SurveySchema;
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
     {

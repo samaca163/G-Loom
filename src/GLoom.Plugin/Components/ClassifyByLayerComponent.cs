@@ -38,7 +38,7 @@ public sealed class ClassifyByLayerComponent : GLoomComponent
     public override IEnumerable<string> Keywords =>
         new[] { "gloom", "survey", "classify", "layer", "category", "usertext", "levantamiento", "capa", "revit" };
 
-    protected override Bitmap Icon => GLoomIcons.SurveyClassify;
+    protected override Bitmap? Icon => GLoomIcons.SurveyClassify;
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
     {
