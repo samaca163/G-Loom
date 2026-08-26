@@ -9,7 +9,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
 
     <!-- Plugin metadata -->
-    <Version>0.2.2</Version>
+    <Version>0.3.0-mcp.1</Version>
     <Title>G-Loom</Title>
     <Authors>iSamacA</Authors>
     <Company>iSamacA</Company>
