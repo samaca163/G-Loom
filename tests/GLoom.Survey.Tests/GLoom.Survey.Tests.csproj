@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Plain net8.0, not the plugin's net7.0-windows. The whole point of this project
+         is that the code under test is host-free: no Rhino, no Grasshopper, no WinForms.
+         If it ever stops building here, something impure was added to Survey/. -->
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Sources are linked, not project-referenced. A ProjectReference would drag in
+         GLoom.Plugin's Grasshopper dependency and the whole Rhino host surface, which
+         would defeat the check above. -->
+    <Compile Include="../../src/GLoom.Plugin/Survey/**/*.cs" LinkBase="Survey" />
+    <Compile Include="../../src/GLoom.Plugin/Vcs/RepoDiscovery.cs" LinkBase="Vcs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+</Project>
