@@ -20,6 +20,7 @@
     <Compile Include="../../src/GLoom.Plugin/Serialization/DocumentDiff.cs" LinkBase="Serialization" />
     <Compile Include="../../src/GLoom.Plugin/Serialization/DiffSummaryText.cs" LinkBase="Serialization" />
     <Compile Include="../../src/GLoom.Plugin/Serialization/TagMetadata.cs" LinkBase="Serialization" />
+    <Compile Include="../../src/GLoom.Plugin/Vcs/CommitTrailers.cs" LinkBase="Vcs" />
     <Compile Include="../../src/GLoom.Plugin/Vcs/CommitVersioning.cs" LinkBase="Vcs" />
     <Compile Include="../../src/GLoom.Plugin/Vcs/GLoomLog.cs" LinkBase="Vcs" />
     <Compile Include="../../src/GLoom.Plugin/Vcs/GLoomRepository.cs" LinkBase="Vcs" />
