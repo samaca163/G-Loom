@@ -307,7 +307,7 @@ Adapted from a standalone `RepoRoot.cs` script the user had been running in a C#
 
 ### experiment/mcp — G-Loom as an MCP server (v0.3.0-mcp.1, increment 1 of 8)
 
-**Status: increment 1 built and unit-tested on macOS (real sockets, no Rhino); the Windows smoke test and the Revit load gate are the next steps.** Branches from `experiment/canvas-components`. The full plan, catalogue and execution protocol live in the session plan that created the branch; this section is the in-repo summary.
+**Status: rungs 1 and 1b done — smoke-tested on Windows 2026-08-26, inside Rhino.Inside.Revit, which clears the load gate and rung 1 in the hardest host at once. Rung 2 (the memory lane) is next.** Branches from `experiment/canvas-components`. The full plan, catalogue and execution protocol live in the session plan that created the branch; this section is the in-repo summary.
 
 **The idea.** Coding-agent sessions (Claude Code first; Cursor and Codex later) read, understand and operate Rhino / Grasshopper / Revit / Rhino.Inside.Revit *through G-Loom*: the project's version history is the record of design decisions, a previous version of a definition is readable and restorable (whole or per component), an agent's edits get a checkpoint before and a diffable, revertible, attributed commit after. It is the "AI era" leg of `docs/STRATEGY.md` built early, as an experiment, off the launch path.
 
@@ -330,8 +330,8 @@ Adapted from a standalone `RepoRoot.cs` script the user had been running in a C#
 
 | # | Scope | Exit |
 |---|---|---|
-| 1 | transport proof: endpoint, panel row, `gloom_status`, `gloom_history` | `claude mcp add …`; `/mcp` connected; a real history answered; foreign `Origin` → 403; a call during a solve returns after it; a second Rhino takes 27181 |
-| 1b | **Revit load gate, zero code**: open Revit → RiR → GH; `[G-Loom] MCP listening` in the command line; `ping` served | recorded here either way; failure cancels rung 8 only |
+| 1 | transport proof: endpoint, panel row, `gloom_status`, `gloom_history` | **Passed 2026-08-26** — `claude mcp add …`; `/mcp` connected; a real history answered; foreign `Origin` → 403; a call during a solve returns after it; a second Rhino takes 27181 |
+| 1b | **Revit load gate, zero code**: open Revit → RiR → GH; `[G-Loom] MCP listening` in the command line; `ping` served | **Passed 2026-08-26** — rung 1's whole exercise ran inside RiR, so the endpoint serves real tool calls there, not just a load. Rung 8 stays on the ladder. |
 | 2 | memory lane: `read_version` (paged), `diff`, `explain_changes`, `branches/tags/toolchain`, `decision_record`, resources, 2 prompts | unit tests; `@gloom:` works; `gloom_diff` matches the panel drawer |
 | 3 | live read via `UiThread`: documents, `read_document` (+ runtime sidecar), `read_outputs`, `solve`, catalogue (`ObjectProxies` + `CreateInstance`), `canvas_image` (`GetCanvasScreenBuffer`), `rhino_context` | error component reported; a call with a modal open times out cleanly; screenshot has ink |
 | 4 | provenance + restore: lift `Restore/DocumentRestore.cs` from the overlay, `Vcs/CommitWorkflow.cs` + `Identity.cs` from the panel; envelope (`begin_edit` checkpoint → overlay at that SHA → `end_edit` commit with trailers); `commit`, `restore_file`, `restore_objects`, `set_value` | panel regressions clean; an edit through McNeel's server inside an envelope yields checkpoint + trailers + right-click reject |
