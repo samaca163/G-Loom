@@ -32,6 +32,8 @@ public sealed class McpDispatcher
     public static readonly string[] SupportedProtocolVersions = { "2025-11-25", "2025-06-18" };
 
     private readonly SortedDictionary<string, McpTool> _tools = new(StringComparer.Ordinal);
+    private readonly List<IMcpResourceProvider> _resources = new();
+    private readonly SortedDictionary<string, McpPrompt> _prompts = new(StringComparer.Ordinal);
     private readonly string _serverVersion;
     private readonly string _instructions;
     private readonly SemaphoreSlim _oneCallAtATime = new(1, 1);
@@ -45,7 +47,10 @@ public sealed class McpDispatcher
     }
 
     public void Register(McpTool tool) => _tools[tool.Name] = tool;
+    public void Register(IMcpResourceProvider provider) => _resources.Add(provider);
+    public void Register(McpPrompt prompt) => _prompts[prompt.Name] = prompt;
     public IReadOnlyCollection<McpTool> Tools => _tools.Values;
+    public IReadOnlyCollection<McpPrompt> Prompts => _prompts.Values;
 
     public DispatchResult Handle(string body, DispatchContext ctx)
     {
@@ -76,11 +81,11 @@ public sealed class McpDispatcher
                 "ping" => new JsonObject(),
                 "tools/list" => ToolsList(),
                 "tools/call" => ToolsCall(msg.Params, ctx),
-                "resources/list" => new JsonObject { ["resources"] = new JsonArray() },
-                "resources/templates/list" => new JsonObject { ["resourceTemplates"] = new JsonArray() },
-                "prompts/list" => new JsonObject { ["prompts"] = new JsonArray() },
-                "resources/read" => throw new McpError(JsonRpcErrors.InvalidParams, "Resource not found."),
-                "prompts/get" => throw new McpError(JsonRpcErrors.InvalidParams, "Prompt not found."),
+                "resources/list" => ResourcesList(),
+                "resources/templates/list" => ResourceTemplatesList(),
+                "resources/read" => ResourcesRead(msg.Params, ctx),
+                "prompts/list" => PromptsList(),
+                "prompts/get" => PromptsGet(msg.Params, ctx),
                 _ => throw new McpError(JsonRpcErrors.MethodNotFound, $"Method not found: {msg.Method}"),
             };
             return DispatchResult.Json(200, JsonRpc.Result(msg.Id, result));
@@ -110,7 +115,12 @@ public sealed class McpDispatcher
         return new JsonObject
         {
             ["protocolVersion"] = negotiated,
-            ["capabilities"] = new JsonObject { ["tools"] = new JsonObject { ["listChanged"] = false } },
+            ["capabilities"] = new JsonObject
+            {
+                ["tools"] = new JsonObject { ["listChanged"] = false },
+                ["resources"] = new JsonObject { ["subscribe"] = false, ["listChanged"] = false },
+                ["prompts"] = new JsonObject { ["listChanged"] = false },
+            },
             ["serverInfo"] = new JsonObject { ["name"] = ServerName, ["title"] = "G-Loom", ["version"] = _serverVersion },
             ["instructions"] = _instructions,
         };
@@ -147,6 +157,80 @@ public sealed class McpDispatcher
         catch (Exception e) { result = ToolResult.Error($"{tool.Name} failed: {e.Message}"); }
         finally { _oneCallAtATime.Release(); }
         return result.ToJson();
+    }
+
+    private JsonObject ResourcesList()
+    {
+        var arr = new JsonArray();
+        foreach (var p in _resources)
+            foreach (var r in p.List()) arr.Add(r.Describe());
+        return new JsonObject { ["resources"] = arr };
+    }
+
+    private JsonObject ResourceTemplatesList()
+    {
+        var arr = new JsonArray();
+        foreach (var p in _resources)
+            foreach (var t in p.Templates()) arr.Add(t.Describe());
+        return new JsonObject { ["resourceTemplates"] = arr };
+    }
+
+    // Resource and prompt failures are protocol errors, unlike tool failures: the spec
+    // reserves -32002 for a resource that does not exist, and a client renders the
+    // message either way. Both are reads, so the read-only gate is the only one applied.
+    private JsonObject ResourcesRead(JsonObject? p, DispatchContext ctx)
+    {
+        var uri = OptionalString(p?["uri"], "uri")
+            ?? throw new McpError(JsonRpcErrors.InvalidParams, "\"uri\" is required.");
+        if (AccessDenied(ToolAccess.Read, ctx.Access) is { } denied)
+            throw new McpError(JsonRpcErrors.AccessDenied, denied);
+
+        _oneCallAtATime.Wait(ctx.Cancellation);
+        try
+        {
+            foreach (var provider in _resources)
+            {
+                var contents = provider.Read(uri, ctx.Cancellation);
+                if (contents is null) continue;
+                return new JsonObject { ["contents"] = new JsonArray { contents.ToJson() } };
+            }
+        }
+        catch (ToolArgumentException e) { throw new McpError(JsonRpcErrors.ResourceNotFound, e.Message); }
+        finally { _oneCallAtATime.Release(); }
+        throw new McpError(JsonRpcErrors.ResourceNotFound, $"Resource not found: {uri}");
+    }
+
+    private JsonObject PromptsList()
+    {
+        var arr = new JsonArray();
+        foreach (var p in _prompts.Values) arr.Add(p.Describe());
+        return new JsonObject { ["prompts"] = arr };
+    }
+
+    private JsonObject PromptsGet(JsonObject? p, DispatchContext ctx)
+    {
+        var name = OptionalString(p?["name"], "name")
+            ?? throw new McpError(JsonRpcErrors.InvalidParams, "\"name\" is required.");
+        if (!_prompts.TryGetValue(name, out var prompt))
+            throw new McpError(JsonRpcErrors.InvalidParams, $"Prompt not found: {name}");
+        if (AccessDenied(ToolAccess.Read, ctx.Access) is { } denied)
+            throw new McpError(JsonRpcErrors.AccessDenied, denied);
+
+        var args = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (p!["arguments"] is JsonObject given)
+            foreach (var kv in given)
+                args[kv.Key] = OptionalString(kv.Value, $"arguments.{kv.Key}") ?? "";
+        foreach (var a in prompt.Arguments)
+            if (a.Required && !args.ContainsKey(a.Name))
+                throw new McpError(JsonRpcErrors.InvalidParams, $"Prompt argument \"{a.Name}\" is required.");
+
+        _oneCallAtATime.Wait(ctx.Cancellation);
+        try
+        {
+            return prompt.Handler(args, ctx.Cancellation).ToJson();
+        }
+        catch (ToolArgumentException e) { throw new McpError(JsonRpcErrors.InvalidParams, e.Message); }
+        finally { _oneCallAtATime.Release(); }
     }
 
     private static string? OptionalString(JsonNode? node, string field) => node switch

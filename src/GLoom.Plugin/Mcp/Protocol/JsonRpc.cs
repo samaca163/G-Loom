@@ -69,6 +69,10 @@ public static class JsonRpcErrors
     public const int MethodNotFound = -32601;
     public const int InvalidParams = -32602;
     public const int Internal = -32603;
+    /// <summary>MCP's own code for resources/read on a URI that does not exist.</summary>
+    public const int ResourceNotFound = -32002;
+    // In the server-defined range: the request is well-formed; the server is switched off for agents.
+    public const int AccessDenied = -32001;
 }
 
 public static class JsonRpc
