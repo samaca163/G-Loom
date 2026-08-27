@@ -55,7 +55,9 @@ public class RepositoryTests
         var sha1 = Commit(repo, first, "First");
         Commit(repo, Doc("tower", Slider(Guid(1), 9)), "Second");
 
-        Assert.Equal(CanonicalJson.Write(first), GLoomRepository.ReadFileAtCommit(repo.Root, sha1, Json));
+        // git's clean filter (autocrlf on Windows checkouts) stores LF; the writer emits the platform newline.
+        Assert.Equal(CanonicalJson.Write(first).Replace("\r\n", "\n"),
+            GLoomRepository.ReadFileAtCommit(repo.Root, sha1, Json)!.Replace("\r\n", "\n"));
         Assert.Equal(sha1, GLoomRepository.ResolveCommit(repo.Root, "HEAD~1"));
         Assert.Null(GLoomRepository.ResolveCommit(repo.Root, "no-such-ref"));
         Assert.Null(GLoomRepository.ReadFileAtCommit(repo.Root, sha1, "Coding/missing.gloom.json"));

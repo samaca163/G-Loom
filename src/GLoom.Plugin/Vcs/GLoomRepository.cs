@@ -19,7 +19,7 @@ public static class GLoomRepository
     public sealed record RepoStatus(string Branch, CommitInfo? LastCommit);
     public sealed record BranchInfo(string Name, bool IsCurrent);
     public sealed record ForkPoint(string ParentBranch, string ForkSha);
-    public sealed record TagInfo(string Name, string Sha, string? Message);
+    public sealed record TagInfo(string Name, string Sha, string? Message, DateTimeOffset? When = null, bool IsAnnotated = false);
     public sealed record RemoteInfo(string Name, string FetchUrl);
     public sealed record UpstreamInfo(string Remote, string RemoteBranch);
     public sealed record NetworkResult(bool Success, string Message);
@@ -137,7 +137,8 @@ public static class GLoomRepository
     }
 
     /// <summary>
-    /// Returns up to <paramref name="limit"/> recent commits. If
+    /// Returns up to <paramref name="limit"/> recent commits, walking back from
+    /// <paramref name="startingAt"/> (any commit-ish; HEAD when null). If
     /// <paramref name="repoRelativeFiles"/> is non-null, only commits that
     /// touched any of those files are returned (prevents cross-file
     /// pollution when several .gh definitions share one repo).
@@ -145,7 +146,8 @@ public static class GLoomRepository
     public static IReadOnlyList<CommitInfo> Log(
         string repoRoot,
         int limit,
-        IEnumerable<string>? repoRelativeFiles = null)
+        IEnumerable<string>? repoRelativeFiles = null,
+        string? startingAt = null)
     {
         if (!IsRepo(repoRoot)) return Array.Empty<CommitInfo>();
         if (limit <= 0) limit = 10;
@@ -154,6 +156,7 @@ public static class GLoomRepository
         // Gloom-Version: trailer that dialog-based commits carry there.
         var fmt = $"%H{FieldSep}%an{FieldSep}%aI{FieldSep}%s{FieldSep}%b{RecordSep}";
         var args = new List<string> { "log", $"-n{limit}", $"--pretty=format:{fmt}" };
+        if (!string.IsNullOrWhiteSpace(startingAt)) args.Add(startingAt);
         if (repoRelativeFiles is not null)
         {
             args.Add("--");
@@ -448,7 +451,10 @@ public static class GLoomRepository
     {
         if (!IsRepo(repoRoot)) return Array.Empty<TagInfo>();
 
-        var fmt = $"%(refname:short){FieldSep}%(objectname){FieldSep}%(*objectname){FieldSep}%(contents){RecordSep}";
+        // %(creatordate) is the tagger date of an annotated tag and the committer date of the
+        // commit a lightweight one points at, so every tag sorts by date without a log spawn.
+        var fmt = $"%(refname:short){FieldSep}%(objectname){FieldSep}%(*objectname){FieldSep}%(objecttype){FieldSep}" +
+                  $"%(creatordate:iso-strict){FieldSep}%(contents){RecordSep}";
         var result = Run(repoRoot, "for-each-ref", "refs/tags/", $"--format={fmt}");
         if (result.ExitCode != 0) return Array.Empty<TagInfo>();
 
@@ -461,9 +467,11 @@ public static class GLoomRepository
             var sha = parts.Length >= 3 && !string.IsNullOrWhiteSpace(parts[2])
                 ? parts[2].Trim()
                 : parts[1].Trim();
-            var msg = parts.Length >= 4 ? parts[3].Trim('\n', '\r', ' ') : null;
+            var isAnnotated = parts.Length >= 4 && parts[3].Trim() == "tag";
+            DateTimeOffset? when = parts.Length >= 5 && DateTimeOffset.TryParse(parts[4].Trim(), out var parsed) ? parsed : null;
+            var msg = parts.Length >= 6 ? parts[5].Trim('\n', '\r', ' ') : null;
             if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(sha)) continue;
-            list.Add(new TagInfo(name, sha, string.IsNullOrEmpty(msg) ? null : msg));
+            list.Add(new TagInfo(name, sha, string.IsNullOrEmpty(msg) ? null : msg, when, isAnnotated));
         }
         return list;
     }
@@ -734,16 +742,20 @@ public static class GLoomRepository
         return sorted;
     }
 
+    // core.quotePath (on by default) C-quotes any non-ASCII path ("dise\303\261o.gh", quotes
+    // included), which FilterGh would then drop for not ending in .gh.
     private static IReadOnlyList<string> ListGhFilesAtRef(string repoRoot, string @ref)
     {
-        var result = Run(repoRoot, "ls-tree", "-r", "--name-only", @ref);
+        var result = Run(repoRoot, "-c", "core.quotepath=false", "ls-tree", "-r", "--name-only", @ref);
         if (result.ExitCode != 0) return Array.Empty<string>();
         return FilterGh(result.StdOut);
     }
 
-    private static IReadOnlyList<string> ListGhFilesInWorkingTree(string repoRoot)
+    /// <summary>Every tracked .gh in the working tree, repo-relative, in git's own order.</summary>
+    public static IReadOnlyList<string> ListGhFilesInWorkingTree(string repoRoot)
     {
-        var result = Run(repoRoot, "ls-files");
+        if (!IsRepo(repoRoot)) return Array.Empty<string>();
+        var result = Run(repoRoot, "-c", "core.quotepath=false", "ls-files");
         if (result.ExitCode != 0) return Array.Empty<string>();
         return FilterGh(result.StdOut);
     }
@@ -1025,6 +1037,10 @@ public static class GLoomRepository
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            // git writes UTF-8 (paths, messages, its own errors); the default decoder is the
+            // console code page, which mangles every non-ASCII byte on Windows.
+            StandardOutputEncoding = System.Text.Encoding.UTF8,
+            StandardErrorEncoding = System.Text.Encoding.UTF8,
             CreateNoWindow = true,
         };
         foreach (var a in args) psi.ArgumentList.Add(a);
