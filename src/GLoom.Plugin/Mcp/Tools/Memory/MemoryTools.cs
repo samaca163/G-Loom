@@ -44,7 +44,7 @@ public static class MemoryTools
     public static ToolResult Status(string? file, LiveSnapshot? live)
     {
         var f = ProjectLocator.Locate(file, live);
-        var files = new[] { f.GhRel, f.JsonRel };
+        var files = f.Files;
         var status = GLoomRepository.GetStatus(f.RepoRoot, files);
         var count = GLoomRepository.CountCommitsTouching(f.RepoRoot, files);
 
@@ -66,7 +66,7 @@ public static class MemoryTools
             recipePath = f.JsonRel,
             branch = status.Branch,
             commitCount = count,
-            nextVersion = CommitVersioning.FormatMessage(BaseName(f.GhRel), count + 1),
+            nextVersion = CommitVersioning.FormatMessage(f.BaseName, count + 1),
             lastCommit = status.LastCommit is { } lc ? Summarize(lc, currentSha) : null,
             currentVersion = current is null ? null : Summarize(current, currentSha),
             unsavedEdits = f.IsActiveDocument ? live!.IsDirty : (bool?)null,
@@ -81,7 +81,7 @@ public static class MemoryTools
     {
         var f = ProjectLocator.Locate(file, live);
         limit = Math.Clamp(limit, 1, 200);
-        var files = new[] { f.GhRel, f.JsonRel };
+        var files = f.Files;
         var fetched = GLoomRepository.Log(f.RepoRoot, limit + 1, files);
         var commits = fetched.Take(limit).ToList();
         var currentSha = f.IsActiveDocument && live is not null ? live.CurrentSha : null;
@@ -106,15 +106,7 @@ public static class MemoryTools
     {
         var split = CommitTrailers.Parse(c.Body);
         return new CommitSummary(
-            c.Sha, Short(c.Sha), CommitVersioning.ExtractVersionLabel(c), c.Message, split.Text,
+            c.Sha, VersionRef.Short(c.Sha), CommitVersioning.ExtractVersionLabel(c), c.Message, split.Text,
             split.Trailers, c.Author, c.When, c.Sha == currentSha);
-    }
-
-    private static string Short(string sha) => sha.Length > 7 ? sha[..7] : sha;
-
-    private static string BaseName(string ghRel)
-    {
-        var name = ghRel.Contains('/') ? ghRel[(ghRel.LastIndexOf('/') + 1)..] : ghRel;
-        return name.EndsWith(".gh", StringComparison.OrdinalIgnoreCase) ? name[..^3] : name;
     }
 }

@@ -11,7 +11,12 @@ public sealed record LocatedFile(
     string RepoRoot,
     string GhRel,
     string JsonRel,
-    bool IsActiveDocument);
+    bool IsActiveDocument)
+{
+    public string[] Files => new[] { GhRel, JsonRel };
+    public string FileName => Path.GetFileName(GhRel);
+    public string BaseName => FileName.EndsWith(".gh", StringComparison.OrdinalIgnoreCase) ? FileName[..^3] : FileName;
+}
 
 /// <summary>
 /// Turns a tool's optional "file" argument into repo-relative paths. Absolute paths stand

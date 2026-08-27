@@ -81,11 +81,21 @@ public static class McpService
             "G-Loom is the project's memory for Grasshopper definitions: every definition (.gh) in a project " +
             "has a version history of commits, each with a version label like tower_V012, a subject and a " +
             "description of the design decision. Call gloom_status first to learn which definition is active, " +
-            "its project root and where it stands in history; then gloom_history to read the record of decisions. " +
-            "File arguments are absolute paths or paths relative to the project root.");
+            "its project root and where it stands in history. Then: gloom_history or gloom_decision_record for " +
+            "the record of decisions; gloom_diff and gloom_explain_changes for what changed between two versions " +
+            "(by default the last committed version and the file on disk); gloom_read_version for the recipe at " +
+            "any version; gloom_branches for the project's system options; gloom_tags and gloom_toolchain for " +
+            "milestones and the Rhino / Grasshopper / Rhino.Inside.Revit / G-Loom versions they were pinned on. " +
+            "The same facts are readable as gloom:// resources, and the prompts review-changes and design-history " +
+            "open a review or a history conversation. File arguments are absolute paths or paths relative to the " +
+            "project root; version arguments accept a label (V012), a sha, a tag, a branch, HEAD or \"working\".");
         d.ClientInitialized += (name, ver) =>
             RhinoApp.WriteLine($"[G-Loom] MCP client connected: {name} {ver}".TrimEnd());
         MemoryTools.Register(d, LiveSnapshot);
+        VersionTools.Register(d, LiveSnapshot);
+        RecordTools.Register(d, LiveSnapshot, ToolchainSnapshot.Capture);
+        d.Register(new GloomResources(LiveSnapshot));
+        GloomPrompts.Register(d, LiveSnapshot);
         return d;
     }
 
