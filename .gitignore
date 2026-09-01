@@ -41,3 +41,7 @@ dist/
 
 # Logs
 *.log
+
+# Contexto operativo y estrategia — locales, fuera del repo público
+CLAUDE.md
+docs/STRATEGY.md
