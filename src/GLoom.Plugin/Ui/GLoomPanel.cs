@@ -62,6 +62,8 @@ public sealed class GLoomPanel : Panel
     private readonly Label _syncStatusLabel = NewValueLabel();
     private readonly Button _syncButton = new() { Text = "Sync" };
     private readonly Button _agentButton = new() { Text = "Off  ▼" };
+    private readonly Label _envelopeLabel = new() { Text = "-", Wrap = WrapMode.Word };
+    private readonly Button _envelopeClearButton = new() { Text = "Clear" };
     private readonly Label _currentVersionLabel = NewValueLabel();
     private readonly Label _lastCommitLabel = NewValueLabel();
     private readonly Label _nextVersionLabel = NewValueLabel();
@@ -114,11 +116,12 @@ public sealed class GLoomPanel : Panel
         _agentButton.Click += (_, _) => { BuildAgentMenu(); _agentMenu?.Show(_agentButton); };
         _onMcpChanged = () =>
         {
-            try { Application.Instance.AsyncInvoke(RenderAgentRow); }
+            try { Application.Instance.AsyncInvoke(() => { RenderAgentRow(); RenderEnvelopeRow(); }); }
             catch { /* not yet attached to an Eto loop */ }
         };
         McpService.Changed += _onMcpChanged;
         RenderAgentRow();
+        RenderEnvelopeRow();
 
         // Two-way binding with the overlay singleton: clicking the box
         // toggles the overlay; the overlay raising EnabledChanged
@@ -198,6 +201,7 @@ public sealed class GLoomPanel : Panel
                 LabelRow("Remote:",          _remoteButton),
                 LabelRow("Sync:",            BuildSyncRow()),
                 LabelRow("Agent access:",    _agentButton),
+                LabelRow("Agent editing:",   BuildEnvelopeRow()),
                 LabelRow("Current version:", _currentVersionLabel),
                 LabelRow("Last commit:",     _lastCommitLabel),
                 LabelRow("Next version:",    _nextVersionLabel),
@@ -264,6 +268,49 @@ public sealed class GLoomPanel : Panel
     {
         if (disposing) McpService.Changed -= _onMcpChanged;
         base.Dispose(disposing);
+    }
+
+    private StackLayout BuildEnvelopeRow()
+    {
+        _envelopeClearButton.Click += (_, _) =>
+        {
+            // Leaves the canvas exactly as it is - only the envelope and the overlay's
+            // comparison point are cleared. Undoing the agent's work is the history list's
+            // job, where the checkpoint sits as an ordinary version with a Restore button.
+            EnvelopeStore.Close();
+            CanvasDiffOverlay.Instance.SetComparisonReference("HEAD");
+            RhinoApp.WriteLine("[G-Loom] Cleared the open agent edit envelope.");
+            RenderEnvelopeRow();
+        };
+
+        return new StackLayout
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 6,
+            VerticalContentAlignment = Eto.Forms.VerticalAlignment.Center,
+            Items = { new StackLayoutItem(_envelopeLabel, true), _envelopeClearButton },
+        };
+    }
+
+    /// <summary>
+    /// Shows who is mid-edit, so an agent working through any server is visible in Rhino
+    /// rather than only in its own transcript. The row is independent of the tracked document
+    /// - the envelope belongs to this Rhino - so it renders from the store, not from a refresh.
+    /// </summary>
+    private void RenderEnvelopeRow()
+    {
+        if (_envelopeLabel.IsDisposed) return;
+        var open = EnvelopeStore.Current;
+        if (open is null)
+        {
+            _envelopeLabel.Text = "-";
+            _envelopeClearButton.Visible = false;
+            return;
+        }
+
+        var since = open.OpenedAt.ToLocalTime().ToString("HH:mm");
+        _envelopeLabel.Text = $"{open.Describe()} on {Path.GetFileName(open.DefinitionPath)}, since {since}";
+        _envelopeClearButton.Visible = true;
     }
 
     private void RenderAgentRow()
@@ -438,6 +485,10 @@ public sealed class GLoomPanel : Panel
     /// </summary>
     private void RequestRefresh()
     {
+        // Before the early returns: an envelope can be open on a document that is not the
+        // active one, and the human should still see that an agent is mid-edit.
+        RenderEnvelopeRow();
+
         var s = DocumentTracker.Instance.State;
 
         if (s.Document is null) { SetIdle("(no Grasshopper document loaded)"); return; }
