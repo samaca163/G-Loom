@@ -18,8 +18,6 @@ public static class VersionTools
     private const int DefaultPage = 50, MaxPage = 200;
     private const int DefaultItems = 200, MaxItems = 1000;
 
-    private static readonly string[] ObjectKinds = { "component", "param" };
-
     internal const string WorkingTreeNote =
         "The recipe on disk (.gloom.json) is written at commit time, so edits made on the canvas since " +
         "the last commit are not in it; gloom_status reports unsavedEdits.";
@@ -42,8 +40,7 @@ public static class VersionTools
                 .Integer("offset", "Index of the first object to return (default 0).", min: 0)
                 .Integer("limit", "Objects per page (default 50, max 200).", min: 1, max: MaxPage)
                 .String("query", "Case-insensitive substring matched against each object's name, nickname and instanceGuid.")
-                .Enum("kind", "Only objects of this kind: \"component\" (has inputs and outputs) or \"param\" (a free-floating " +
-                              "slider, panel, toggle, value list, swatch or other parameter). Omit for both.", ObjectKinds)
+                .Enum("kind", ObjectFilter.KindDescription, ObjectFilter.Kinds)
                 .Build(),
             ToolAccess.Read,
             (args, _) => ReadVersion(
@@ -101,13 +98,9 @@ public static class VersionTools
         limit = Math.Clamp(limit, 1, MaxPage);
 
         var q = string.IsNullOrWhiteSpace(query) ? null : query.Trim();
-        var k = string.IsNullOrWhiteSpace(kind) ? null : kind.Trim();
-        if (k is not null && !ObjectKinds.Contains(k, StringComparer.OrdinalIgnoreCase))
-            throw new ToolArgumentException(
-                $"\"kind\" must be \"component\" or \"param\" (got \"{k}\"); sliders, panels, toggles and value lists are " +
-                "params, so use \"query\" to narrow by name.");
+        var k = ObjectFilter.ValidateKind(kind);
         var matched = doc.Objects
-            .Where(o => q is null || Matches(o, q))
+            .Where(o => q is null || ObjectFilter.Matches(o, q))
             .Where(o => k is null || string.Equals(o.Kind, k, StringComparison.OrdinalIgnoreCase))
             .ToList();
         var page = matched.Skip(offset).Take(limit).ToList();
@@ -261,11 +254,6 @@ public static class VersionTools
             }
         return map;
     }
-
-    private static bool Matches(CanonicalObject o, string q) =>
-        o.Name.Contains(q, StringComparison.OrdinalIgnoreCase)
-        || o.Nickname.Contains(q, StringComparison.OrdinalIgnoreCase)
-        || o.InstanceGuid.Contains(q, StringComparison.OrdinalIgnoreCase);
 
     internal static Dictionary<string, int> CountByKind(CanonicalDocument doc) =>
         doc.Objects.GroupBy(o => o.Kind, StringComparer.Ordinal)
