@@ -25,6 +25,7 @@
     <Compile Include="../../src/GLoom.Plugin/Vcs/GLoomLog.cs" LinkBase="Vcs" />
     <Compile Include="../../src/GLoom.Plugin/Vcs/GLoomRepository.cs" LinkBase="Vcs" />
     <Compile Include="../../src/GLoom.Plugin/Vcs/IndexGate.cs" LinkBase="Vcs" />
+    <Compile Include="../../src/GLoom.Plugin/Vcs/Identity.cs" LinkBase="Vcs" />
     <Compile Include="../../src/GLoom.Plugin/Vcs/RepoDiscovery.cs" LinkBase="Vcs" />
     <Compile Include="../../src/GLoom.Plugin/Mcp/Protocol/**/*.cs" LinkBase="Mcp/Protocol" />
     <Compile Include="../../src/GLoom.Plugin/Mcp/State/**/*.cs" LinkBase="Mcp/State" />

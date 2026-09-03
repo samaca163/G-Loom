@@ -57,7 +57,7 @@ public static class WriteTools
                 .String("file", ProjectLocator.FileArgDescription)
                 .String("version", VersionRef.ArgDescription + " Omit to revert to the last committed version.")
                 .Build(),
-            ToolAccess.Write,
+            ToolAccess.Destructive,
             (args, _) => Revert(
                 Args.String(args, "file"), Args.String(args, "version"), live(), reloadFromDisk)));
 
@@ -275,22 +275,19 @@ public static class WriteTools
                 "gloom_tag pins a committed version; name a label, SHA, tag or branch (or omit \"version\" for the last " +
                 "committed one).");
 
-        var (identity, email) = GLoomRepository.ConfiguredIdentity(f.RepoRoot);
-        if (identity is null)
-            throw new ToolArgumentException(
-                "This repo has no commit identity set. Run `git config user.name \"...\"` and " +
-                "`git config user.email \"...\"` first so the tag is attributed to you.");
+        var author = Identity.Resolve(f.RepoRoot)
+            ?? throw new ToolArgumentException(Identity.NotSetMessage);
 
         var metadata = new TagMetadata(
             SchemaVersion: 2,
             TagName: tag,
             CommitSha: v.Sha,
             CreatedAt: DateTimeOffset.UtcNow,
-            CreatedBy: identity,
+            CreatedBy: author.Name,
             Toolchain: captureToolchain(),
             Notes: string.IsNullOrWhiteSpace(notes) ? null : notes.Trim());
 
-        GLoomRepository.CreateAnnotatedTag(f.RepoRoot, tag, v.Sha, TagMetadataJson.Write(metadata), identity, email ?? "unknown");
+        GLoomRepository.CreateAnnotatedTag(f.RepoRoot, tag, v.Sha, TagMetadataJson.Write(metadata), author.Name, author.Email);
 
         // A tag leaves TrackedState unchanged, so the panel would not re-read; force it.
         refreshTracker();
@@ -300,7 +297,7 @@ public static class WriteTools
             tagged = true,
             tag = tag,
             commit = new { version = v.Label, sha = v.Sha, shortSha = v.ShortSha },
-            createdBy = identity,
+            createdBy = author.Name,
             toolchain = metadata.Toolchain,
             note = "Annotated tag created with the toolchain pinned for reproducibility; it travels with `git push --tags`.",
         });

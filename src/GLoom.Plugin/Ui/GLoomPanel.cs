@@ -1365,6 +1365,13 @@ public sealed class GLoomPanel : Panel
         var result = dialog.ShowModal();
         if (result is null) return;
 
+        var author = Identity.Resolve(s.RepoPath);
+        if (author is null)
+        {
+            MessageBox.Show(Identity.NotSetMessage, "G-Loom", MessageBoxButtons.OK, MessageBoxType.Warning);
+            return;
+        }
+
         var sha7 = commitSha[..7];
         try
         {
@@ -1376,7 +1383,7 @@ public sealed class GLoomPanel : Panel
                 TagName: result.Name,
                 CommitSha: commitSha,
                 CreatedAt: DateTimeOffset.UtcNow,
-                CreatedBy: "iSamacA",
+                CreatedBy: author.Name,
                 Toolchain: ToolchainSnapshot.Capture(),
                 Notes: result.Notes,
                 Aec: result.Aec,
@@ -1386,7 +1393,7 @@ public sealed class GLoomPanel : Panel
 
             GLoomRepository.CreateAnnotatedTag(
                 s.RepoPath, result.Name, commitSha, json,
-                taggerName: "iSamacA", taggerEmail: "samaca163@gmail.com");
+                taggerName: author.Name, taggerEmail: author.Email);
             RhinoApp.WriteLine($"[G-Loom] Tagged {sha7} as '{result.Name}'.");
             DocumentTracker.Instance.Refresh();
             RequestRefresh();
@@ -1435,6 +1442,15 @@ public sealed class GLoomPanel : Panel
         {
             string? sha;
             string subject;
+
+            // Resolved before anything is written, so an unconfigured repo is refused
+            // before the canvas is saved and the pair staged.
+            var author = Identity.Resolve(s.RepoPath);
+            if (author is null)
+            {
+                MessageBox.Show(Identity.NotSetMessage, "G-Loom", MessageBoxButtons.OK, MessageBoxType.Warning);
+                return;
+            }
 
             // The mid-commit IsModified=false below raises ModifiedChanged,
             // which used to trigger a full tracker recompute (and a panel
@@ -1539,7 +1555,7 @@ public sealed class GLoomPanel : Panel
 
                     sha = GLoomRepository.CommitStaged(
                         s.RepoPath, subject, body,
-                        authorName: "iSamacA", authorEmail: "samaca163@gmail.com");
+                        authorName: author.Name, authorEmail: author.Email);
                     committed = sha is not null;
                 }
                 finally
@@ -1690,8 +1706,11 @@ public sealed class GLoomPanel : Panel
                 Orientation = Orientation.Vertical,
                 Spacing = 2,
             };
-            var notes = DescriptionFromBody(info.Body);
+            var split = CommitTrailers.Parse(info.Body);
+            var notes = DescriptionFromBody(split.Text);
             if (notes.Length > 0) drawerStack.Items.Add(BuildNotesPanel(notes));
+            var attribution = AttributionLine(split.Trailers);
+            if (attribution is not null) drawerStack.Items.Add(BuildNotesPanel(attribution));
             drawerStack.Items.Add(tagsPanel);
             if (!isCurrent) drawerStack.Items.Add(diffSlot);
 
@@ -1761,6 +1780,21 @@ public sealed class GLoomPanel : Panel
         /// <c>Gloom-Version:</c> trailer paragraph stripped. Empty for commits
         /// made before this feature (their body is the bare trailer or blank).
         /// </summary>
+        /// <summary>
+        /// Names the agent behind a version, so the person reviewing it can see one was
+        /// involved without asking an agent to tell them.
+        /// </summary>
+        private static string? AttributionLine(IReadOnlyDictionary<string, string> trailers)
+        {
+            if (!trailers.TryGetValue("Gloom-Agent", out var agent) || agent.Length == 0) return null;
+            var line = $"Made by {agent}";
+            if (trailers.TryGetValue("Gloom-Intent", out var intent) && intent.Length > 0)
+                line += $" — {intent}";
+            if (trailers.TryGetValue("Gloom-Checkpoint-Base", out var basis) && basis.Length > 0)
+                line += $" (from {basis[..Math.Min(7, basis.Length)]})";
+            return line;
+        }
+
         private static string DescriptionFromBody(string? body)
         {
             if (string.IsNullOrWhiteSpace(body)) return "";
