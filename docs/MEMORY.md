@@ -5,61 +5,63 @@
 
 ---
 
-## 2026-09-02 — MCP commit/tag debugging + hardening (`experiment/mcp`)
+## 2026-09-03 — rungs 3, 4 and 5 (`experiment/mcp`, `v0.3.0-mcp.4`)
 
-### ⚠️ Read first — the environment is shared and unstable
-- **Multiple opencode sessions share the SAME local working tree.** One session's edits get
-  clobbered by another. This session's code fixes were **reverted by a re-clone/reset** mid-session
-  (reflog: fresh `clone` + `checkout experiment/mcp`). **Always re-verify a fix is present before
-  relying on it — do not assume it survived a re-clone or another session's commit.**
-- The tree is now a **fresh clone** of GitHub `experiment/mcp`, and the MCP layer was **refactored**
-  since some work below: tools are in `Mcp/Tools/Memory/{MemoryTools,RecordTools,VersionTools}.cs`,
-  host in `Mcp/Host/`, protocol in `Mcp/Protocol/`, state in `Mcp/State/`. Older names
-  (`Tools-Memory.cs`, `CommitTag.cs`, `TagMetadata.cs`, `TagTools.cs`) map to these new files.
+### The thing to learn from this session
+**Rung 3 had been finished on 2026-08-27 and was never committed.** ~100 KB of working,
+unit-tested code sat untracked in a second clone at `D:\Code Projects\G-Loom` for a week while
+this branch's notes said it was "next". It was recovered as the first act of this session
+(backup branch `rescue/rung3-2026-08-27`, pushed before anything else, then cherry-picked).
 
-### What this session diagnosed and fixed (re-verify each is still present)
-1. **MCP `gloom_commit` did not refresh the panel** (stuck "Unversioned / Untracked").
-   - Root cause: the panel only recomputes on *document* change events; a pure git commit fires none.
-   - Fix: after a successful MCP commit, call `DocumentTracker.Instance.Refresh()` (force recompute
-     past the stat-key memo). Where: the MCP commit tool's success path.
-2. **MCP commits were missing the `Gloom-Agent:` / `Gloom-Intent:` trailers.**
-   - Root cause: the MCP commit path called `GLoomRepository.CommitStaged` directly (which only appends
-     `Gloom-Version:`), bypassing the `gloom_commit` tool's trailer logic.
-   - Fix: stamp `Gloom-Agent: gloom-mcp` + `Gloom-Intent: <tool|intent>` in the MCP commit path.
-3. **`gloom_tag` notes were being dropped.**
-   - Root cause: the `notes` param was captured but never written into the tag message.
-   - Fix: store `notes` into `TagMetadata.Notes` before serializing. Added regression test
-     `Commit_Tag_StoresNotes`.
-4. **Root cause of the recurring "needs Rhino reload after deploy": a STALE duplicate assembly
-   shadowed the new build.**
-   - `%APPDATA%\Grasshopper\Libraries\G-Loom\` held BOTH `GLoom.gha` (new) and an old `GLoom.dll`.
-     Grasshopper loaded the stale one, so correct fixes "didn't work until reload."
-   - Fix: hardened `build/deploy-local.ps1` to auto-remove stray assemblies (any `GLoom.*` that
-     isn't the freshly-built `GLoom.gha`) after copying, so deploys can't be silently shadowed.
+**So: commit AND push after every self-contained piece.** Committing is not enough — the loss
+mode here is a re-clone or a second session, and only `origin` survives those. A checkout that
+is not the one you are in may be holding finished work; `git status` in each is worth ten
+minutes at the start of a session. As of today only two G-Loom checkouts exist on `D:` and the
+other one is at `fbccf00` with its work now recovered and pushed.
 
-### Learnings to carry forward
-- **"Recompute after commit" is the invariant.** Every commit path (panel dialog AND MCP tool) must
-  end in `DocumentTracker.Refresh()` (force) so panel + overlay track the new HEAD.
-- **Stale duplicate assemblies are a first-class deploy hazard.** Only `GLoom.gha` may sit in the
-  Libraries folder; the deploy script now enforces that.
-- **Trailer conventions:** `Gloom-Version:` (auto), `Gloom-Agent:` (identity), `Gloom-Intent:`
-  (action). All commit paths should stamp them.
-- **Tag metadata stores free-text `notes`** in the tag message JSON.
-- **Panel debounce is 250 ms** (`CommitDialog._debounceMs`) — a smoke test that polls too fast will
-  read "Unversioned" transiently.
-- **Concurrency is the top risk to losing work** — verify, then commit promptly.
+### What landed
+- **Rung 3 rescued** as five blame-isolated commits: shared object filter → contract + host →
+  tools + tests → registration → version. 20 tools.
+- **Two defects in shipped code**, both found while verifying the plan rather than by testing:
+  - `UiThread.Run` used `Task.Wait`, which wraps a faulted task in `AggregateException`, so the
+    dispatcher's `ToolArgumentException` case never matched and **every** host-bound refusal
+    reached the agent as *"failed: One or more errors occurred."* Now waits on the completion
+    handle so `GetResult` rethrows the original type.
+  - The panel stages the `.gh`/`.gloom.json` pair across its **modal** dialog, and git's index is
+    repo-wide, so an MCP `gloom_commit` in that window committed the human's staged files under
+    the agent's subject — and the panel's rollback then unstaged already-committed paths and said
+    "nothing to commit" for a commit that happened. `Vcs/IndexGate.cs` now guards it.
+- **Rung 4**: the edit envelope (`gloom_begin_edit` / `gloom_end_edit`), `gloom_set_value`,
+  `gloom_restore_objects`, `Ui/DocumentRestore.cs` lifted out of the overlay, an
+  `Agent editing:` row in the panel. 24 tools, 143 test cases.
+- **Rung 5**: `agent/gloom/` — plugin manifest, `.mcp.json`, three skills.
+
+### Invariants added or reinforced
+- **`IndexGate` is interlocked and readable from any thread on purpose.** Checking it through
+  `UiThread.Run` would wait out the full 30 s timeout during exactly the long solve it exists to
+  stay clear of. Rule: **no MCP tool ever opens a modal dialog.**
+- **A canvas mutation requires an open envelope.** `gloom_set_value` and `gloom_restore_objects`
+  refuse without one, so there is always a version to undo from — including for edits made
+  through McNeel's server, which G-Loom cannot intercept.
+- **`Vcs/Identity.cs` is the only commit identity.** The panel used to hardcode a name and email
+  at all three write sites while the MCP path read git config; they disagreed on any machine
+  whose config differs, and this one's does.
+- **Values G-Loom will not write back**: gradients and MD sliders (read by reflection over
+  third-party types — writing them would mean invoking reflected methods, the thing that broke
+  Grasshopper's drawing pipeline once) and internalised data (stored only as a digest). All
+  three refuse out loud; `ApplyPersistent` used to silently no-op, so restoring a value list
+  appeared to work and did not.
 
 ### State at end of session
-- Branch `experiment/mcp`, version `0.3.0-mcp.2` (pre-release).
-- Tests: 94/94 passing as of this session (GLoom.Core.Tests + GLoom.Survey.Tests) — re-run to confirm.
-- Deploy: hardened `build/deploy-local.ps1`; `GLoom.gha` (0.3.0-mcp.2) deployed; stray `GLoom.dll` removed.
+- Branch `experiment/mcp` at `v0.3.0-mcp.4`, in sync with `origin`, working tree clean.
+- 143 test cases green; both projects build with zero warnings.
+- **Not yet smoke-tested in Rhino.** That is the next job — see the smoke-test recipe in
+  `CLAUDE.md`. Note the currently deployed `GLoom.gha` predates all of this.
 
 ### Resume checklist
-1. **Re-verify the 4 fixes above are actually in the tree** (a re-clone may have reverted them);
-   re-apply if missing (details above).
-2. **Smoke test in Rhino (Windows):** `gloom_commit` → panel auto-advances to the new `V###` with no
-   reload; the commit carries `Gloom-Agent`/`Gloom-Intent`; `gloom_tag` with `notes` → notes present
-   in the tag message.
-3. **Phase 5 (AGENTS.md):** Grasshopper 2 / Rhino 9 Beta verification; format-adapter seam;
-   GhJSON interop; the pending Windows smoke-test pass; test coverage for the pure logic.
-4. **Coordinate sessions** on the shared working tree.
+1. Close Rhino → `build\deploy-local.ps1` → open a definition in a G-Loom project.
+2. Panel → `Agent access:` → **Read-write** → `Copy connect command` → `/mcp` shows 24 tools.
+3. Walk the rung 3/4/5 smoke recipe in `CLAUDE.md`. The one that proves the whole thesis:
+   `gloom_begin_edit` → watch the canvas switch to the checkpoint and highlight the agent's edit
+   → `gloom_end_edit` → the drawer names the agent and intent → right-click the change to reject it.
+4. Then rung 6 (the unattended dev loop) or Phase 5 work on `main`.
