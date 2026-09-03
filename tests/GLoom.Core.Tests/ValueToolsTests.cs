@@ -145,6 +145,66 @@ public class ValueToolsTests : IDisposable
     }
 
     [Fact]
+    public void Restore_defaults_to_the_envelopes_own_checkpoint()
+    {
+        using var repo = GitRepo.Init();
+        var sha = Seed(repo);
+        Open(repo, sha);
+        var host = new FakeLiveHost();
+
+        var r = ValueTools.RestoreObjects(host, null, null, null, true, Live(repo, sha));
+        var o = (JsonObject)r.StructuredContent!;
+
+        Assert.Equal(sha, (string)o["sha"]!);
+        Assert.Equal(1, (int)o["restored"]!);
+
+        // The whole recorded version went to the host, since no objects were named.
+        var sent = (IReadOnlyList<CanonicalObject>)host.ArgsOf("RestoreObjects")[1]!;
+        Assert.Single(sent);
+    }
+
+    [Fact]
+    public void Restore_picks_only_the_objects_named()
+    {
+        using var repo = GitRepo.Init();
+        var sha = Seed(repo);
+        Open(repo, sha);
+        var host = new FakeLiveHost();
+
+        ValueTools.RestoreObjects(host, null, null, Guid(1), true, Live(repo, sha));
+
+        var sent = (IReadOnlyList<CanonicalObject>)host.ArgsOf("RestoreObjects")[1]!;
+        Assert.Equal(Guid(1), sent[0].InstanceGuid);
+    }
+
+    [Fact]
+    public void Restore_says_so_when_nothing_matched_rather_than_restoring_everything()
+    {
+        using var repo = GitRepo.Init();
+        var sha = Seed(repo);
+        Open(repo, sha);
+        var host = new FakeLiveHost();
+
+        Assert.Throws<ToolArgumentException>(() => ValueTools.RestoreObjects(
+            host, null, null, "NotOnTheCanvas", true, Live(repo, sha)));
+        Assert.Equal(0, host.CallsTo("RestoreObjects"));
+    }
+
+    [Fact]
+    public void Restore_refuses_without_an_open_envelope()
+    {
+        using var repo = GitRepo.Init();
+        var sha = Seed(repo);
+        var host = new FakeLiveHost();
+
+        var r = ValueTools.RestoreObjects(host, null, null, null, true, Live(repo, sha));
+
+        Assert.True(r.IsError);
+        Assert.Contains("gloom_begin_edit", r.Content[0].Text);
+        Assert.Equal(0, host.CallsTo("RestoreObjects"));
+    }
+
+    [Fact]
     public void An_envelope_on_another_definition_does_not_authorise_this_one()
     {
         using var repo = GitRepo.Init();

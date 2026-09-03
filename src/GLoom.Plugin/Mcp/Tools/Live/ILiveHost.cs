@@ -33,6 +33,11 @@ public interface ILiveHost
     /// reported against its target rather than failing the batch.</summary>
     IReadOnlyList<ValueEditResult> SetValues(string? file, IReadOnlyList<ValueEdit> edits, bool solve);
 
+    /// <summary>Puts recorded objects back on the canvas: value and position reset where they
+    /// still exist, recreated where they were deleted. One undoable step for the batch.</summary>
+    IReadOnlyList<RestoredObject> RestoreObjects(
+        string? file, IReadOnlyList<GLoom.Serialization.CanonicalObject> objects, bool solve);
+
     IReadOnlyList<CatalogueCategory> Categories();
 
     /// <summary>Grasshopper's own fuzzy search when <paramref name="query"/> is given, else every

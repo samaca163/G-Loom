@@ -113,6 +113,22 @@ public sealed class LiveHost : ILiveHost
             return results;
         });
 
+    public IReadOnlyList<RestoredObject> RestoreObjects(
+        string? file, IReadOnlyList<CanonicalObject> objects, bool solve) =>
+        UiThread.Run(() =>
+        {
+            var doc = Resolve(file);
+            var results = LiveRestore.Apply(doc, objects);
+
+            if (solve && results.Any(r => r.Restored) && GH_Document.EnableSolutions && doc.Enabled
+                && doc.SolutionState != GH_ProcessStep.Process)
+            {
+                doc.NewSolution(false, GH_SolutionMode.CommandLine);
+            }
+
+            return results;
+        });
+
     public IReadOnlyList<CatalogueCategory> Categories() => UiThread.Run(() => LiveCatalogue.Categories());
 
     public IReadOnlyList<CatalogueEntry> Search(string? query, string? category, bool includeObsolete, int maxResults) =>

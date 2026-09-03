@@ -143,6 +143,16 @@ internal sealed class FakeLiveHost : ILiveHost
                 .ToList(),
             file, edits, solve);
 
+    public List<RestoredObject>? RestoreResults { get; set; }
+
+    public IReadOnlyList<RestoredObject> RestoreObjects(
+        string? file, IReadOnlyList<GLoom.Serialization.CanonicalObject> objects, bool solve) =>
+        Answer("RestoreObjects",
+            RestoreResults ?? objects
+                .Select(o => new RestoredObject(o.Nickname, true, o.InstanceGuid, o.Name, "value reset"))
+                .ToList(),
+            file, objects, solve);
+
     public IReadOnlyList<CatalogueCategory> Categories() => Answer("Categories", CategoryList);
 
     public IReadOnlyList<CatalogueEntry> Search(string? query, string? category, bool includeObsolete, int maxResults) =>

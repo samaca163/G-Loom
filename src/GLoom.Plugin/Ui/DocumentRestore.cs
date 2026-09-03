@@ -36,14 +36,17 @@ public static class DocumentRestore
         live.ExpireSolution(false);
     }
 
-    public static void RestorePersistent(GH_Document doc, ObjectChange change)
+    public static string? RestorePersistent(GH_Document doc, ObjectChange change)
     {
-        if (!Guid.TryParse(change.To.InstanceGuid, out var id)) return;
+        if (!Guid.TryParse(change.To.InstanceGuid, out var id)) return "Unreadable instance guid.";
         var live = doc.Objects.FirstOrDefault(o => o.InstanceGuid == id);
-        if (live is null) return;
+        if (live is null) return "That object is no longer on the canvas.";
 
-        ApplyPersistent(live, change.From.Persistent);
+        var reason = ApplyPersistent(live, change.From.Persistent);
+        if (reason is not null) return reason;
+
         live.ExpireSolution(false);
+        return null;
     }
 
     /// <summary>
@@ -124,12 +127,44 @@ public static class DocumentRestore
     /// object) and deletion-restore (apply OLD value to freshly recreated
     /// object). Unsupported kinds and missing fields no-op gracefully.
     /// </summary>
-    public static void ApplyPersistent(IGH_DocumentObject obj, PersistentData? from)
+    /// <summary>Null when the value was written; the reason it could not be, otherwise. The
+    /// overlay ignores it - its menu only offers kinds it painted - but an agent restoring by
+    /// name needs to be told, rather than being let believe a silent no-op worked.</summary>
+    public static string? ApplyPersistent(IGH_DocumentObject obj, PersistentData? from)
     {
-        if (from is null) return;
+        if (from is null) return null;
 
         switch (from.Kind)
         {
+            case "valuelist" when obj is GH_ValueList list && from.ValueListSelected is { } wanted:
+                var items = list.ListItems;
+                var single = wanted.Count == 1
+                    ? items.FindIndex(i => string.Equals(i.Name, wanted[0], StringComparison.OrdinalIgnoreCase))
+                    : -1;
+                if (single >= 0)
+                {
+                    list.SelectItem(single);
+                    break;
+                }
+
+                // Multi-selection: toggle only the items whose state differs, so a checklist
+                // ends up exactly as the recorded version had it.
+                for (var i = 0; i < items.Count; i++)
+                {
+                    var shouldBeOn = wanted.Any(w => string.Equals(w, items[i].Name, StringComparison.OrdinalIgnoreCase));
+                    if (items[i].Selected != shouldBeOn) list.ToggleItem(i);
+                }
+                break;
+
+            case "gradient":
+            case "mdslider":
+                return $"{obj.NickName} is a {from.Kind}; G-Loom reads its value but has no typed way to write it " +
+                       "back. Set it on the canvas.";
+
+            case "data":
+                return $"{obj.NickName} holds internalised data, which G-Loom records only as a digest - there is " +
+                       "nothing to restore from. Revert the whole definition instead.";
+
             case "slider" when obj is GH_NumberSlider slider && from.Slider is { } sv:
                 slider.Slider.Minimum = sv.Min;
                 slider.Slider.Maximum = sv.Max;
@@ -154,5 +189,7 @@ public static class DocumentRestore
                 catch { /* malformed hex - leave as-is */ }
                 break;
         }
+
+        return null;
     }
 }

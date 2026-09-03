@@ -143,6 +143,16 @@ public sealed record ValueEditResult(
     string? After = null,
     string? Reason = null);
 
+/// <summary><paramref name="Action"/> says what had to be done to put it back: its value or
+/// position reset, or the whole component recreated because it had been deleted.</summary>
+public sealed record RestoredObject(
+    string Target,
+    bool Restored,
+    string? InstanceGuid = null,
+    string? Name = null,
+    string? Action = null,
+    string? Reason = null);
+
 public enum ImageRegion { Visible, All, Objects }
 
 public sealed record CanvasImage(

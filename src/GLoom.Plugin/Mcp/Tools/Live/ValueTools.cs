@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json.Nodes;
 using GLoom.Mcp.Protocol;
+using GLoom.Mcp.State;
 using GLoom.Mcp.Tools.Memory;
+using GLoom.Serialization;
 
 namespace GLoom.Mcp.Tools.Live;
 
@@ -62,6 +64,88 @@ public static class ValueTools
             (args, _) => SetValues(
                 host, Args.String(args, "file"), Args.Array(args, "edits"),
                 Args.Bool(args, "solve", true), live())));
+
+        d.Register(new McpTool(
+            "gloom_restore_objects",
+            "Put named objects back the way a previous version had them, leaving everything else alone - the way a " +
+            "person rejects one change by right-clicking it on the canvas, rather than reverting the whole " +
+            "definition. An object that still exists has its value and position reset; one that was deleted is " +
+            "recreated with its original identity and its wires reconnected where the sources still exist. Name " +
+            "objects by instanceGuid, name or nickname, comma-separated; omit \"objects\" to restore everything " +
+            "that differs from that version. Requires an open edit envelope.",
+            Schema.Object()
+                .String("file", ProjectLocator.FileArgDescription)
+                .String("version", VersionRef.ArgDescription + " Default: the checkpoint of the open envelope.")
+                .String("objects", "Comma-separated instanceGuids, names or nicknames. Omit to restore every object that differs.")
+                .Boolean("solve", "Recompute the definition once after restoring (default true).")
+                .Build(),
+            ToolAccess.Write,
+            (args, _) => RestoreObjects(
+                host, Args.String(args, "file"), Args.String(args, "version"), Args.String(args, "objects"),
+                Args.Bool(args, "solve", true), live())));
+    }
+
+    public static ToolResult RestoreObjects(
+        ILiveHost host, string? file, string? version, string? objects, bool solve, LiveSnapshot? live)
+    {
+        var f = ProjectLocator.Locate(file, live);
+        if (EnvelopeTools.RequireOpen(f) is { } refusal) return ToolResult.Error(refusal);
+
+        // Default to the envelope's own checkpoint: "put back what I changed" is the common
+        // case, and it is the version the human is already seeing highlighted on canvas.
+        var reference = string.IsNullOrWhiteSpace(version)
+            ? EnvelopeStore.Current!.CheckpointSha
+            : version;
+
+        var resolved = VersionRef.Resolve(f, reference, VersionRef.Working);
+        var recipe = VersionRef.LoadRecipe(f, resolved);
+
+        var wanted = Split(objects);
+        var chosen = wanted.Count == 0
+            ? recipe.Document.Objects
+            : Select(recipe.Document.Objects, wanted);
+
+        if (chosen.Count == 0)
+            throw new ToolArgumentException(
+                $"None of those objects are in {resolved.Label}. gloom_read_version lists what it holds.");
+
+        return LiveTools.Guard(() =>
+        {
+            var results = host.RestoreObjects(file, chosen, solve);
+            var restored = results.Count(r => r.Restored);
+
+            return ToolResult.Json(new
+            {
+                file,
+                version = resolved.Label,
+                sha = resolved.Sha,
+                restored,
+                failed = results.Count - restored,
+                objects = results.Select(r => new { r.Target, r.Restored, r.InstanceGuid, r.Name, r.Action, r.Reason }).ToList(),
+                note = "Restored on the canvas but not committed: the envelope is still open, so gloom_end_edit " +
+                       "commits the result, or discards everything back to the checkpoint.",
+            });
+        });
+    }
+
+    private static IReadOnlyList<string> Split(string? csv) =>
+        string.IsNullOrWhiteSpace(csv)
+            ? System.Array.Empty<string>()
+            : csv.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
+
+    private static IReadOnlyList<CanonicalObject> Select(
+        IReadOnlyList<CanonicalObject> objects, IReadOnlyList<string> wanted)
+    {
+        var chosen = new List<CanonicalObject>();
+        foreach (var w in wanted)
+        {
+            var hit = objects.FirstOrDefault(o =>
+                string.Equals(o.InstanceGuid, w, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(o.Nickname, w, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(o.Name, w, StringComparison.OrdinalIgnoreCase));
+            if (hit is not null && !chosen.Contains(hit)) chosen.Add(hit);
+        }
+        return chosen;
     }
 
     public static ToolResult SetValues(
