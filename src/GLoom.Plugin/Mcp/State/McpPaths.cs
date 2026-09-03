@@ -17,6 +17,11 @@ public static class McpPaths
     public static string TokenFile => Path.Combine(Root, "token");
     public static string EndpointsDir => Path.Combine(Root, "endpoints");
 
+    /// <summary>The open edit envelope for this Rhino, if any. Outlives a request (the server
+    /// is stateless) and outlives a crash, which is how the next session learns one was
+    /// abandoned rather than closed.</summary>
+    public static string EnvelopeFile => Path.Combine(Root, $"envelope-{Environment.ProcessId}.json");
+
     public static void Ensure()
     {
         Directory.CreateDirectory(Root);

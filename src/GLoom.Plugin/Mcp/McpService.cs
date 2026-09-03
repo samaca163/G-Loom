@@ -7,6 +7,7 @@ using GLoom.Mcp.State;
 using GLoom.Mcp.Tools.Live;
 using GLoom.Mcp.Tools.Memory;
 using GLoom.Serialization;
+using GLoom.Ui;
 using GLoom.Vcs;
 using Grasshopper.Kernel;
 using Rhino;
@@ -98,7 +99,11 @@ public static class McpService
             "can also act on the project: gloom_commit commits the active definition as a new version, gloom_revert " +
             "restores a previous version, gloom_switch_branch adopts a system option, gloom_tag pins a milestone " +
             "with its toolchain, and gloom_solve recomputes the definition and reports what failed - each " +
-            "attributed to the human, and gated to read-write access. File arguments are absolute paths or paths " +
+            "attributed to the human, and gated to read-write access. Before changing anything on the canvas - " +
+            "with these tools or another server's - open an edit envelope with gloom_begin_edit and state your " +
+            "intent: it checkpoints the definition so there is always a version to return to, and shows the person " +
+            "watching Rhino your changes highlighted on the canvas as you make them; gloom_end_edit then commits " +
+            "them in your name, or discards them. File arguments are absolute paths or paths " +
             "relative to the project root; version arguments accept a label (V012), a sha, a tag, a branch, HEAD " +
             "or \"working\".");
         d.ClientInitialized += (name, ver) =>
@@ -109,6 +114,7 @@ public static class McpService
         WriteTools.Register(d, LiveSnapshot, SerializeActiveDocument, ReloadFromDisk, ReloadAllInRepo, ToolchainSnapshot.Capture, RefreshTracker);
         d.Register(new GloomResources(LiveSnapshot));
         GloomPrompts.Register(d, LiveSnapshot);
+        EnvelopeTools.Register(d, LiveSnapshot, SerializeActiveDocument, SetOverlayReference, ReloadFromDisk, RefreshTracker);
         LiveTools.Register(d, new LiveHost());
         return d;
     }
@@ -140,6 +146,14 @@ public static class McpService
             }
             return CanonicalJson.Write(DocumentSerializer.Serialize(s.Document));
         });
+    }
+
+    // Aims the canvas overlay at a version, so an open edit envelope shows the agent's
+    // changes against its checkpoint while they are being made. The overlay recomputes and
+    // repaints, both UI-thread work.
+    private static void SetOverlayReference(string reference)
+    {
+        UiThread.Run(() => CanvasDiffOverlay.Instance.SetComparisonReference(reference));
     }
 
     private static void ReloadFromDisk(string filePath)
