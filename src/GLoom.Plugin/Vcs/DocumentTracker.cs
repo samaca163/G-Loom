@@ -231,6 +231,14 @@ public sealed class DocumentTracker
         UpdateActive(_state.Document ?? Instances.ActiveCanvas?.Document, forceMatch: true);
 
     /// <summary>
+    /// Tells listeners to re-read after an external mutation TrackedState may not
+    /// capture (a new tag, a remote push): StateChanged fires even when the
+    /// computed state is unchanged, so the panel re-reads tags/history.
+    /// </summary>
+    public void NotifyExternalChange() =>
+        StateChanged?.Invoke(this, EventArgs.Empty);
+
+    /// <summary>
     /// Replaces the active Grasshopper document with the one freshly read from
     /// <paramref name="filePath"/>. Used after a Restore so the canvas reflects
     /// the new on-disk state without the user having to close + reopen the file.

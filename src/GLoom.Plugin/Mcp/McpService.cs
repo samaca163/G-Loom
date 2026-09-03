@@ -4,7 +4,9 @@ using GLoom.Mcp.Host;
 using GLoom.Mcp.Protocol;
 using GLoom.Mcp.State;
 using GLoom.Mcp.Tools.Memory;
+using GLoom.Serialization;
 using GLoom.Vcs;
+using Grasshopper.Kernel;
 using Rhino;
 
 namespace GLoom.Mcp;
@@ -87,13 +89,18 @@ public static class McpService
             "any version; gloom_branches for the project's system options; gloom_tags and gloom_toolchain for " +
             "milestones and the Rhino / Grasshopper / Rhino.Inside.Revit / G-Loom versions they were pinned on. " +
             "The same facts are readable as gloom:// resources, and the prompts review-changes and design-history " +
-            "open a review or a history conversation. File arguments are absolute paths or paths relative to the " +
-            "project root; version arguments accept a label (V012), a sha, a tag, a branch, HEAD or \"working\".");
+            "open a review or a history conversation. In read-write mode the agent can also act on the project: " +
+            "gloom_commit commits the active definition as a new version, gloom_revert restores a previous version, " +
+            "gloom_switch_branch adopts a system option, and gloom_tag pins a milestone with its toolchain - each " +
+            "attributed to the human, and gated to read-write access. File arguments are absolute paths or paths " +
+            "relative to the project root; version arguments accept a label (V012), a sha, a tag, a branch, HEAD or " +
+            "\"working\".");
         d.ClientInitialized += (name, ver) =>
             RhinoApp.WriteLine($"[G-Loom] MCP client connected: {name} {ver}".TrimEnd());
         MemoryTools.Register(d, LiveSnapshot);
         VersionTools.Register(d, LiveSnapshot);
         RecordTools.Register(d, LiveSnapshot, ToolchainSnapshot.Capture);
+        WriteTools.Register(d, LiveSnapshot, SerializeActiveDocument, ReloadFromDisk, ReloadAllInRepo, ToolchainSnapshot.Capture, RefreshTracker);
         d.Register(new GloomResources(LiveSnapshot));
         GloomPrompts.Register(d, LiveSnapshot);
         return d;
@@ -106,6 +113,57 @@ public static class McpService
         var s = DocumentTracker.Instance.State;
         if (s.FilePath is null) return null;
         return new LiveSnapshot(s.FilePath, s.RepoPath, s.HasUnsavedChanges, s.CurrentRestoredSha, s.IsTracked);
+    }
+
+    // The host side of the write tools: canvas-bound work bridged to Rhino's UI thread (the
+    // write-tools file stays host-free and calls these). Each runs inside a SuspendUpdates
+    // scope so the tracker does exactly one forced recompute once the canvas settles.
+    private static string SerializeActiveDocument()
+    {
+        return UiThread.Run(() =>
+        {
+            using var scope = DocumentTracker.Instance.SuspendUpdates();
+            var s = DocumentTracker.Instance.State;
+            if (s.Document is null || s.FilePath is null)
+                throw new InvalidOperationException("No active Grasshopper document to commit.");
+            if (s.HasUnsavedChanges)
+            {
+                new GH_DocumentIO { Document = s.Document }.SaveQuiet(s.FilePath);
+                s.Document.IsModified = false;
+            }
+            return CanonicalJson.Write(DocumentSerializer.Serialize(s.Document));
+        });
+    }
+
+    private static void ReloadFromDisk(string filePath)
+    {
+        UiThread.Run(() =>
+        {
+            using var scope = DocumentTracker.Instance.SuspendUpdates();
+            DocumentTracker.Instance.ReloadFromDisk(filePath);
+        });
+    }
+
+    private static void ReloadAllInRepo(string repoRoot)
+    {
+        UiThread.Run(() =>
+        {
+            using var scope = DocumentTracker.Instance.SuspendUpdates();
+            DocumentTracker.Instance.ReloadAllInRepo(repoRoot);
+        });
+    }
+
+    // After a commit/tag the canvas already matches, but the tracker's memoized
+    // "current commit" is stale and a tag leaves TrackedState unchanged - so force a
+    // recompute and notify listeners to re-read, or the panel stays stale until a
+    // manual Refresh.
+    private static void RefreshTracker()
+    {
+        UiThread.Run(() =>
+        {
+            DocumentTracker.Instance.Refresh();
+            DocumentTracker.Instance.NotifyExternalChange();
+        });
     }
 
     private static void StartHost()

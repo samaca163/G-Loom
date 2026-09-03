@@ -81,17 +81,30 @@ public static class GLoomRepository
     }
 
     /// <summary>
-    /// Commits whatever is currently staged. Subject and body are passed as two
-    /// separate --message flags; git joins them with a blank line, so the body
-    /// (including any trailing <c>Gloom-Version:</c> trailer) lands as its own
+    /// Commits whatever is currently staged, authored by the repo's configured identity
+    /// (<c>git config user.name/user.email</c>) so the commit stays the human's. Subject and
+    /// body are two --message flags; git joins them with a blank line, so the body (including
+    /// any trailing <c>Gloom-Version:</c> / <c>Gloom-Agent:</c> trailers) lands as its own
     /// paragraph(s). Returns the new commit SHA, or null if nothing was staged.
     /// </summary>
+    public static string? CommitStaged(string repoRoot, string subject, string? body)
+        => CommitStagedCore(repoRoot, subject, body, Array.Empty<(string, string)>());
+
+    /// <summary>Commit with an explicit author override (the panel names the human). The agent
+    /// path uses the config-identity overload instead.</summary>
     public static string? CommitStaged(
         string repoRoot,
         string subject,
         string? body,
         string authorName,
         string authorEmail)
+        => CommitStagedCore(repoRoot, subject, body, new (string, string)[]
+        {
+            ("user.name", authorName),
+            ("user.email", authorEmail),
+        });
+
+    private static string? CommitStagedCore(string repoRoot, string subject, string? body, (string, string)[] identity)
     {
         if (string.IsNullOrWhiteSpace(repoRoot))
             throw new ArgumentException("Repo root is required.", nameof(repoRoot));
@@ -100,12 +113,15 @@ public static class GLoomRepository
         if (string.IsNullOrWhiteSpace(staged.StdOut))
             return null;
 
-        var args = new List<string>
+        var args = new List<string>();
+        foreach (var (key, value) in identity)
         {
-            "-c", $"user.name={authorName}",
-            "-c", $"user.email={authorEmail}",
-            "commit", "--message", subject,
-        };
+            args.Add("-c");
+            args.Add($"{key}={value}");
+        }
+        args.Add("commit");
+        args.Add("--message");
+        args.Add(subject);
         if (!string.IsNullOrWhiteSpace(body))
         {
             args.Add("--message");
@@ -119,6 +135,18 @@ public static class GLoomRepository
 
         var sha = Run(repoRoot, "rev-parse", "HEAD");
         return sha.ExitCode == 0 ? sha.StdOut.Trim() : null;
+    }
+
+    /// <summary>The repo's configured commit identity, or nulls when unset. A null name means
+    /// git will reject the commit/tag and the caller should hint "set git config user.name/email".</summary>
+    public static (string? Name, string? Email) ConfiguredIdentity(string repoRoot)
+    {
+        if (!IsRepo(repoRoot)) return (null, null);
+        var name = Run(repoRoot, "config", "user.name");
+        var email = Run(repoRoot, "config", "user.email");
+        return (
+            name.ExitCode == 0 && !string.IsNullOrWhiteSpace(name.StdOut) ? name.StdOut.Trim() : null,
+            email.ExitCode == 0 && !string.IsNullOrWhiteSpace(email.StdOut) ? email.StdOut.Trim() : null);
     }
 
     /// <summary>

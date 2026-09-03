@@ -46,6 +46,22 @@ if (Test-Path $TargetDir) { Remove-Item -Recurse -Force $TargetDir }
 New-Item -ItemType Directory -Path $TargetDir | Out-Null
 Copy-Item -Path $Output -Destination $TargetDir
 
+# Remove any stray GLoom.gha elsewhere in the Grasshopper tree (e.g. a flat
+# Libraries\GLoom.gha left by an older deploy layout). Two same-identity
+# assemblies load in conflict and the host keeps whichever loads first, so a
+# stale one will shadow the new build. Keep only the one we just deployed.
+$Canonical = Join-Path $TargetDir 'GLoom.gha'
+Get-ChildItem -Path (Join-Path $env:APPDATA 'Grasshopper') -Recurse -Filter 'GLoom.gha' -File -ErrorAction SilentlyContinue |
+  Where-Object { $_.FullName -ne $Canonical } |
+  ForEach-Object {
+    try {
+      Remove-Item -LiteralPath $_.FullName -Force
+      Write-Host "[deploy-local] Removed stray assembly: $($_.FullName)"
+    } catch {
+      Write-Host "[deploy-local] WARNING: stray not removed (locked by Rhino?): $($_.FullName)"
+    }
+  }
+
 Write-Host "[deploy-local] Deployed to: $TargetDir"
 Get-ChildItem $TargetDir | ForEach-Object { Write-Host "[deploy-local]   $($_.Name)" }
 Write-Host '[deploy-local] Restart Rhino to load the new build.'
