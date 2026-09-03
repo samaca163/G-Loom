@@ -21,7 +21,7 @@ other one is at `fbccf00` with its work now recovered and pushed.
 
 ### What landed
 - **Rung 3 rescued** as five blame-isolated commits: shared object filter → contract + host →
-  tools + tests → registration → version. 20 tools.
+  tools + tests → registration → version. Took the surface from 13 tools to 20.
 - **Two defects in shipped code**, both found while verifying the plan rather than by testing:
   - `UiThread.Run` used `Task.Wait`, which wraps a faulted task in `AggregateException`, so the
     dispatcher's `ToolArgumentException` case never matched and **every** host-bound refusal
@@ -58,10 +58,21 @@ other one is at `fbccf00` with its work now recovered and pushed.
 - **Not yet smoke-tested in Rhino.** That is the next job — see the smoke-test recipe in
   `CLAUDE.md`. Note the currently deployed `GLoom.gha` predates all of this.
 
-### Resume checklist
-1. Close Rhino → `build\deploy-local.ps1` → open a definition in a G-Loom project.
-2. Panel → `Agent access:` → **Read-write** → `Copy connect command` → `/mcp` shows 24 tools.
-3. Walk the rung 3/4/5 smoke recipe in `CLAUDE.md`. The one that proves the whole thesis:
-   `gloom_begin_edit` → watch the canvas switch to the checkpoint and highlight the agent's edit
-   → `gloom_end_edit` → the drawer names the agent and intent → right-click the change to reject it.
-4. Then rung 6 (the unattended dev loop) or Phase 5 work on `main`.
+### Resume checklist — the next session starts here
+
+**Smoke-test everything before writing anything.** The full per-tool case list is the section
+*"THE NEXT SESSION'S FIRST JOB — smoke-test all of it"* in `CLAUDE.md`: 24 tools, their error
+paths, the five fixes as regressions, the panel regressions, and the access/transport checks.
+`AGENTS.md` carries the condensed version.
+
+1. Ask the user to close Rhino, then `build\deploy-local.ps1`. Confirm `[G-Loom] Plugin loaded.`
+   and `gloom_rhino_context` reporting `0.3.0-mcp.4` — the cheapest proof the assembly is not stale.
+2. Panel → `Agent access:` → **Read-write** → `Copy connect command` → `/mcp` lists **24 tools**.
+3. Walk the case list. **Append results to this file as you go, failures included** — a case that
+   fails is worth more written down than quietly fixed, because the fix usually belongs to a
+   different session than the discovery.
+4. The one exercise that proves the whole branch, worth doing last: ask an agent to change a design
+   value → it opens an envelope and states its intent → you watch the change highlighted on your
+   canvas → you right-click one and reject it → it commits the rest → the drawer names the agent
+   and why.
+5. Only then: rung 6 (the unattended dev loop), or Phase 5 work on `main`.

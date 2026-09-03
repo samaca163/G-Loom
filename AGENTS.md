@@ -1,5 +1,12 @@
 # AGENTS.md — working guide for G-Loom
 
+> **▶ FIRST JOB THIS SESSION (set 2026-09-03).** On `experiment/mcp` at `v0.3.0-mcp.4`: rungs 3, 4
+> and 5 are built, unit-tested (143 cases, zero warnings) and pushed, and **not one of the 24 MCP
+> tools has run inside Rhino**. Smoke-test them before starting anything new. The full case list —
+> per tool, including error paths and panel regressions — is the section
+> **"THE NEXT SESSION'S FIRST JOB — smoke-test all of it"** in `CLAUDE.md`. Write results into
+> `docs/MEMORY.md` as you go. Deploying needs Rhino **closed**; ask the user first.
+
 Start here to begin development. This is the actionable guide: what the
 project is, how it's built, how to build/test/deploy, and the rules that keep
 it working. For the deeper "why" (thesis, decisions, strategy, roadmap
@@ -270,7 +277,22 @@ names; pre-rewrite state is preserved at tag `backup/pre-branch-rework`.
 
 ## Where we are / what's next
 
-Current course (see `docs/STRATEGY.md` for the full rationale):
+**Immediately: smoke-test the MCP surface.** Nothing below starts until that
+is done. The per-tool case list lives in `CLAUDE.md`; the shape of it is:
+
+| Area | The cases that matter most |
+|---|---|
+| Deploy | `[G-Loom] Plugin loaded.`, and `gloom_rhino_context` reporting `0.3.0-mcp.4` — the cheapest proof you are not on a stale `.gha` |
+| Connect | `/mcp` lists **24 tools**; any other number means a registration was lost |
+| Live read | Move a slider *without saving*: `gloom_read_document` sees it, the recipe on disk does not. Break a component → it appears in `problems`. A screenshot with **ink**, not a blank |
+| Errors | Any bad argument names the real problem — "one or more errors occurred" anywhere means `UiThread.Run` regressed |
+| Solve | Locked solver and background tab both refused honestly, rather than reporting a stale error list as fresh |
+| Envelope | `gloom_begin_edit` commits unsaved work as the checkpoint and **the canvas overlay switches to it**; `gloom_set_value` refused without one; `gloom_end_edit` commits with the four trailers, authored by the human |
+| Restore | Value lists actually restore now (they silently did not); a deleted component comes back with its identity and wires |
+| Regressions | Right-click restore for every ghost kind — the primitives moved to `Ui/DocumentRestore.cs` this session. Panel commit, branches, remotes, tags unchanged |
+| Access | `Off` still *lists* tools but refuses calls; `Read-only` refuses the write ones; foreign `Origin` → 403 |
+
+Then, current course (see `docs/STRATEGY.md` for the full rationale):
 
 - **Phase 5 — De-risk & harden** *(now)*: hands-on Grasshopper 2 verification
   in the Rhino 9 Beta; a format-adapter seam so the canonical schema / diff /

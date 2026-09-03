@@ -1,5 +1,14 @@
 # CLAUDE.md — context for future Claude Code sessions on G-Loom
 
+> **▶ START HERE (2026-09-03).** You are on `experiment/mcp` at `v0.3.0-mcp.4`. Rungs 3, 4 and 5
+> are built, unit-tested (143 cases) and pushed — and **none of it has run inside Rhino**. The
+> first job of this session is the smoke test: see
+> [**THE NEXT SESSION'S FIRST JOB — smoke-test all of it**](#the-next-sessions-first-job--smoke-test-all-of-it),
+> which lists the cases for every one of the 24 tools. Do not start a new feature until those
+> cases have been walked and the results written into `docs/MEMORY.md`.
+>
+> Deploying needs Rhino **closed** — ask the user, don't redeploy proactively.
+
 This file is the single document a future Claude session should read first to get oriented. It captures the project's thesis, architecture, conventions, and the design decisions that aren't obvious from the code. The user's persistent memory under `~/.claude/projects/D--Code-Projects-G-Loom/memory/` holds the same conclusions in smaller pieces — this file is the consolidated narrative. The strategic direction (history, market position, viability, roadmap rationale) lives in `docs/STRATEGY.md`.
 
 ## What G-Loom is, in one sentence
@@ -383,7 +392,228 @@ Adapted from a standalone `RepoRoot.cs` script the user had been running in a C#
 | 7 | hardening: modern protocol era, progress on long solves, size caps, Cursor/Codex, optional stdio bridge | all three clients connect |
 | 8 | Revit satellite (only if 1b passed): read-only Revit context/query via RiR's `ActivationGate` / an `ExternalEvent` made at load; never raise-and-wait from inside a GH solve | served inside Revit during a solve, no deadlock |
 
-**Smoke-test recipe (Windows):** close Rhino → `build/deploy-local.ps1` → open a definition inside a G-Loom repo → panel `Agent access:` → `Read-only` → `Copy connect command` → paste in a terminal → `claude` → `/mcp` shows `gloom` connected → "what's the history of this definition?" → **rung 2:** type `@gloom:` and pick `gloom://definition/<rel>/record` (the decision record should land in the conversation) → "what changed since V003?" (expects `gloom_diff` / `gloom_explain_changes`, with the same names and summaries the drawer shows for that row) → `/mcp` → `gloom` → prompts → `review-changes` (the review must quote before/after values and draft `Subject:`/`Description:`) → "which Rhino was the last milestone made on?" (`gloom_toolchain` with `running` filled in) → **rung 3:** break a component on the canvas (disconnect a required input) → "does this definition have errors?" (`gloom_read_document` must name the component and its message in `problems`) → "what does the loft output?" (`gloom_read_outputs` with a data tree) → "show me the canvas" (`gloom_canvas_image`; the picture must show the components, not a blank) → open a modal in Rhino (e.g. `Options`) and ask again: the tool must answer with the UI-thread-busy error within ~30 s, not hang → switch to `Read-write` and "solve it" (`gloom_solve` reports the same errors) → `/mcp` shows 24 tools → then `curl -X POST http://localhost:27180/mcp -H "Origin: http://evil.example" …` must return 403, and on macOS both `http://localhost:…` and `http://127.0.0.1:…` must answer `ping` (the managed listener binds one address per prefix host, so both are registered; `[::1]` prefixes are rejected by it and are not served).
+### THE NEXT SESSION'S FIRST JOB — smoke-test all of it
+
+Rungs 3, 4 and 5 are built, unit-tested and pushed, and **none of it has run inside Rhino**. Every
+tool below is unproven against a real canvas. Do this before writing any new feature; a rung is not
+passed until its cases are.
+
+Record results in `docs/MEMORY.md` as you go — a case that fails is more valuable written down than
+fixed silently, because the fix usually belongs in a different session than the discovery.
+
+#### 0 — Deploy (Rhino must be CLOSED; the `.gha` is locked while loaded)
+
+```
+powershell -ExecutionPolicy Bypass -File build\deploy-local.ps1
+```
+
+Then open Rhino → Grasshopper. **Expect `[G-Loom] Plugin loaded.`** The `.gha` deployed before this
+session predates every write tool, so if the panel looks unchanged you are running a stale
+assembly — check that only `GLoom.gha` sits in `%APPDATA%\Grasshopper\Libraries\G-Loom\`.
+
+Open a definition inside a G-Loom project that has **at least three committed versions** and
+contains a slider, a panel, a boolean toggle, a value list, a colour swatch and one component that
+can be made to fail. Most cases below need all of them.
+
+#### 1 — Connect
+
+Panel → `Agent access:` → **Read-only** → `Copy connect command` → paste in a terminal → `claude`
+→ `/mcp`.
+
+- [ ] `gloom` connects; **24 tools** listed. Any other number means a registration was lost.
+- [ ] `gloom_rhino_context` reports `gloomVersion 0.3.0-mcp.4` — this is the cheapest proof you are
+      not on a stale assembly, and worth doing before anything else.
+
+#### 2 — Rung 3, the live read tools
+
+**`gloom_documents`**
+- [ ] Two definitions open: exactly one `isActive`; object counts and error/warning counts match
+      what the canvas shows.
+- [ ] A never-saved definition appears with a null path and does not break the listing.
+- [ ] A definition outside any repo lists with a null project root rather than failing.
+- [ ] Edit the canvas without saving → `isModified` flips to true.
+
+**`gloom_read_document`** — the tool that justifies the whole rung
+- [ ] **Move a slider and do not save.** `gloom_read_document` shows the new value while
+      `gloom_read_version` (working) still shows the old one. That contrast — live canvas versus
+      recipe on disk — is the payoff; if it does not hold, the rung is not passed.
+- [ ] Disconnect a required input → that component appears in `problems` with its real Grasshopper
+      message, listed up front regardless of paging.
+- [ ] `onlyProblems: true` returns only the failing objects.
+- [ ] `query` and `kind` filters narrow as `gloom_read_version` does for the same words.
+- [ ] `offset`/`limit` page a large definition without dropping or repeating objects.
+- [ ] A component inside a cluster does not crash the walk.
+
+**`gloom_read_outputs`**
+- [ ] By nickname, by name, and by instanceGuid — all three resolve.
+- [ ] By an **input or output port's** guid (as `gloom_read_document` lists them) → the data at
+      that port.
+- [ ] A name matching two objects → refused, listing the candidates.
+- [ ] A name matching nothing → **a readable message naming the problem.** If this says "one or
+      more errors occurred", the `UiThread` fix has regressed.
+- [ ] A geometry output → type plus bounding box, never raw coordinates.
+- [ ] A data tree with several branches → paths like `{0;1}` with their items in order.
+- [ ] `maxItems` smaller than the data → `truncated: true`, and raising it returns the rest.
+- [ ] A group or scribble → refused with "no data outputs", not a crash.
+
+**`gloom_solve`** (needs read-write)
+- [ ] In **Read-only** mode → refused with the panel's access message, not an obscure failure.
+- [ ] In Read-write → runs, and its error list matches what the canvas shows.
+- [ ] `expireAll: true` recomputes everything; `false` only the expired.
+- [ ] Grasshopper's **Solution → Lock Solver** on → reports `solverLocked`, does not pretend it ran.
+- [ ] Solve a definition on a **background tab** → refused with the "disabled" message. Grasshopper
+      disables tabs it is not showing, and a stale error list would otherwise read as a fresh result.
+- [ ] On a slow definition, `timeoutSeconds` is honoured and the message names the solve, not the
+      generic 30-second UI-thread text.
+- [ ] While a long solve runs, another tool call **waits** and then answers. Documented behaviour,
+      not a bug — but confirm it recovers rather than wedging.
+
+**`gloom_catalogue`**
+- [ ] `query` finds a core component by a partial name, ranked sensibly.
+- [ ] A category listing pages correctly.
+- [ ] `describe` on a `componentGuid` returns the real input and output names of the **installed**
+      version.
+- [ ] A component from an installed **plug-in** is found and names its library.
+- [ ] `includeObsolete` changes the result set.
+- [ ] An unknown guid → readable error.
+
+**`gloom_canvas_image`**
+- [ ] `region: visible` → a PNG that **has ink**: components visible, not a blank rectangle. Check
+      the picture, not merely that nothing threw — libgdiplus silently no-ops some GDI+ calls.
+- [ ] `region: all` frames every object including ones off-screen.
+- [ ] `region: objects` with a `query` frames just those.
+- [ ] `maxWidth`/`maxHeight` are respected and the result stays under the size cap.
+
+**`gloom_rhino_context`**
+- [ ] Rhino, Grasshopper and G-Loom versions are right; `insideRevit` false in plain Rhino.
+- [ ] Active model units, tolerance, object and layer counts match Rhino.
+- [ ] `openDefinitions` matches `gloom_documents`.
+
+**UI-thread contention** (applies to every tool above)
+- [ ] Open a modal in Rhino (`Options`), then call a live tool → it must answer with the
+      UI-thread-busy error within ~30 s, **not hang**. Dismiss the dialog → the next call works.
+
+#### 3 — Rung 4, the edit envelope
+
+This is the sequence that proves the branch's thesis. Do it with the Grasshopper canvas visible.
+
+**`gloom_begin_edit`**
+- [ ] With **unsaved canvas edits**: commits them first, `committedNow: true`, and the panel
+      advances to a new `V###` — your work is preserved, not discarded.
+- [ ] With a clean canvas: `committedNow: false` and the checkpoint is the last committed version.
+- [ ] **Watch the canvas.** The overlay switches to comparing against the checkpoint. This is the
+      single most important visual check in the whole plan.
+- [ ] The panel's **`Agent editing:`** row appears with the agent, definition and time.
+- [ ] A second `gloom_begin_edit` → refused, naming the holder *and its intent*.
+- [ ] Missing `intent` → refused.
+- [ ] A definition with no committed version → a clear "commit it once first", not a crash.
+
+**`gloom_set_value`**
+- [ ] **Called with no envelope open → refused, pointing at `gloom_begin_edit`.** The mandatory
+      checkpoint is the safety claim; if this passes through, the claim is false.
+- [ ] Slider: a plain number applies; `before`/`after` are right.
+- [ ] Slider beyond its range → the range **widens** rather than clamping silently.
+- [ ] Panel: text applies, including multi-line.
+- [ ] Toggle: `true`/`false`, and also `1`/`0`.
+- [ ] Value list: by item name, and by expression.
+- [ ] Colour: `AARRGGBB`, bare `RRGGBB` (alpha filled in, not invisible), and a name like `Tomato`.
+- [ ] A **batch** of five edits → all applied, one recompute, and **a single Ctrl+Z undoes them all**.
+- [ ] A batch containing one impossible edit (target a gradient) → that one reports its reason, the
+      others still land, `applied`/`failed` counts are right.
+- [ ] `solve: false` → no recompute happens.
+- [ ] **Watch the canvas**: each change appears highlighted against the checkpoint as it lands.
+- [ ] A decimal like `3.75` arrives as `3.75` — this machine's locale writes `3,75`, so a wrong
+      answer here means the invariant-formatting path broke.
+
+**`gloom_restore_objects`**
+- [ ] With no envelope → refused.
+- [ ] With `objects` omitted → defaults to the envelope's checkpoint and puts the definition back.
+- [ ] Naming two objects → only those revert; everything else stays as the agent left it.
+- [ ] **Delete a component, then restore it** → recreated with its original identity, pivot and
+      persistent value, and its input wires reconnected where the sources still exist.
+- [ ] Restore a **value list** → it actually changes. This was silently doing nothing before; it is
+      the regression case for that fix.
+- [ ] Restore a **gradient** → an honest refusal naming why, not a silent no-op.
+- [ ] A component whose type is no longer installed → reported as not recreatable, not a crash.
+
+**`gloom_end_edit`**
+- [ ] Commit path: the new version's drawer shows **`Made by <agent> — <intent>`**, and
+      `git log` shows `Gloom-Agent`, `Gloom-Agent-Session`, `Gloom-Intent` and
+      `Gloom-Checkpoint-Base` trailers.
+- [ ] The commit's **author is you**, from `git config` — never the agent.
+- [ ] The panel advances to the new version **without a manual Refresh**.
+- [ ] The overlay returns to comparing against `HEAD`; the `Agent editing:` row disappears.
+- [ ] `discard: true` → the canvas **reloads** to the checkpoint and the agent's edits are gone from
+      both git and the canvas. A canvas still showing them means the reload was skipped.
+- [ ] Nothing changed since the checkpoint → closes cleanly and says so, no empty commit.
+- [ ] Called with no envelope open → clear error.
+
+**Envelope lifecycle**
+- [ ] Open an envelope, **quit Rhino without closing it**, reopen → the panel shows it still open,
+      and **Clear** releases it without touching the canvas.
+- [ ] After Clear, `gloom_begin_edit` works again.
+
+#### 4 — The five fixes, as regressions
+
+- [ ] **Error messages.** Any bad argument to any live tool names the actual problem. "One or more
+      errors occurred" anywhere means `UiThread.Run` regressed.
+- [ ] **Index gate.** Open the panel's commit dialog and *leave it open*; ask the agent to commit →
+      refused with "the G-Loom panel is committing right now". Cancel the dialog → the agent's
+      commit works. Then confirm the panel's own commit still succeeds afterwards.
+- [ ] **Identity.** A commit made through the panel and one made through `gloom_end_edit` show the
+      **same** author, and it matches `git config user.name`. Temporarily unset it → both paths
+      refuse with the "run `git config`" hint rather than failing part-way.
+- [ ] **Drawer attribution.** An agent-made version names the agent and intent on its own line; a
+      human-made one shows no such line and no raw `Gloom-` text in the notes.
+- [ ] **Destructive annotation.** `gloom_revert` is advertised as destructive to the client.
+
+#### 5 — Panel regressions (nothing here should have changed)
+
+- [ ] Commit through the dialog; version increments; notes render in the drawer.
+- [ ] Restore from a history row.
+- [ ] Branch create / switch / rename / delete; the fork markers still render.
+- [ ] Remote and Sync rows; ahead/behind counts.
+- [ ] Tag create with AEC/product/release metadata, and delete.
+- [ ] Overlay toggle, the four filters, hover-for-details.
+- [ ] **Right-click restore for every ghost kind** — moved, deleted, and each persistent kind
+      (slider, panel, boolean, colour, and now value list). The restore primitives moved to
+      `Ui/DocumentRestore.cs` this session; this is the regression check for that move.
+- [ ] Compare-against-any-commit (`◎`/`◉`) still works, and an open envelope does not fight it: if
+      you change the reference by hand mid-envelope, the checkpoint is still what `end_edit` uses.
+
+#### 6 — Transport and access
+
+- [ ] `Agent access: Off` → tools still **listed** (so an agent can plan) but every call refused
+      with the panel's message.
+- [ ] `Read-only` → the write tools refuse; the read tools work.
+- [ ] Foreign `Origin` → **403**: `curl -X POST http://localhost:27180/mcp -H "Origin: http://evil.example" …`
+- [ ] Missing or wrong bearer token → **401**; `GET` → **405**.
+- [ ] A second Rhino takes port **27181**, and both endpoint files appear under
+      `%APPDATA%\G-Loom\mcp\endpoints\`.
+- [ ] On macOS, both `http://localhost:…` and `http://127.0.0.1:…` answer `ping` (the managed
+      listener binds one address per prefix host, so both are registered; `[::1]` prefixes are
+      rejected by it and are not served).
+
+#### 7 — Rung 5, the agent plugin
+
+- [ ] Install `agent/gloom/` as a Claude Code plugin in a **fresh** session; the three skills appear.
+- [ ] Export `GLOOM_MCP_TOKEN` from `%APPDATA%\G-Loom\mcp\token` and confirm `/mcp` connects
+      through the plugin's `.mcp.json` rather than the copied connect command.
+- [ ] Ask a plain question — "what changed in this definition and why?" — and check the agent
+      reaches for `gloom_status` first, as the skill instructs, and talks about *system options*
+      rather than branches.
+- [ ] Ask for a change and check it opens an envelope unprompted.
+
+#### 8 — The end-to-end exercise
+
+One pass that exercises the whole thesis, worth doing last as a summary:
+
+> Ask an agent to change a design value. It opens an envelope and states its intent. You watch the
+> change appear highlighted on your canvas. You right-click one of the changes and reject it. The
+> agent commits the rest. The history drawer shows the version, who made it and why, and
+> `gloom_diff` against the checkpoint agrees with what you saw.
+
+If that runs cleanly, rungs 3, 4 and 5 are passed and the branch is ready for rung 6.
 
 ### Experimental branches (this branch is one of them)
 
