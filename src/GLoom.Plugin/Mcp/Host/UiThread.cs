@@ -9,9 +9,10 @@ namespace GLoom.Mcp.Host;
 /// The one bridge from a listener thread to Rhino's UI thread. Grasshopper documents,
 /// the canvas and Eto are UI-thread-only (macOS aborts the process on off-thread access),
 /// so every host-touching tool runs through here. Waits are one-directional and bounded:
-/// the listener waits on the UI with a timeout, the UI never waits on the listener. A
-/// timed-out action is also cancelled, so it cannot run later against a canvas the tool
-/// already reported it could not reach.
+/// the listener waits on the UI with a timeout, the UI never waits on the listener. An
+/// action that has not started when the wait expires is dropped, so it cannot run later
+/// against a canvas the tool already reported it could not reach; one already running
+/// still finishes, because Grasshopper offers no way to interrupt it.
 /// </summary>
 public static class UiThread
 {
@@ -37,7 +38,11 @@ public static class UiThread
             catch (Exception ex) { tcs.TrySetException(ex); }
         }));
 
-        if (!tcs.Task.Wait(timeout ?? DefaultTimeout))
+        // Wait on the handle, not Task.Wait: Task.Wait wraps a faulted result in an
+        // AggregateException, which hides every ToolArgumentException the tools raise -
+        // the agent would read "one or more errors occurred" instead of what went wrong.
+        // GetResult below rethrows the original exception with its type intact.
+        if (!((IAsyncResult)tcs.Task).AsyncWaitHandle.WaitOne(timeout ?? DefaultTimeout))
         {
             Volatile.Write(ref abandoned, 1);
             throw new TimeoutException(
