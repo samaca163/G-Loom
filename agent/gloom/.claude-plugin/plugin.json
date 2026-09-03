@@ -1,0 +1,10 @@
+{
+  "name": "gloom",
+  "displayName": "G-Loom",
+  "version": "0.3.0",
+  "description": "Work on Grasshopper definitions through G-Loom: the project's version history, the live canvas, and a checkpoint before every edit.",
+  "author": { "name": "iSamacA" },
+  "repository": "https://github.com/samaca163/G-Loom",
+  "license": "MIT",
+  "mcpServers": "./.mcp.json"
+}

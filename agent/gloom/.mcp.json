@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "gloom": {
+      "type": "http",
+      "url": "${GLOOM_MCP_URL:-http://localhost:27180/mcp}",
+      "headers": {
+        "Authorization": "Bearer ${GLOOM_MCP_TOKEN}"
+      },
+      "timeout": 600000
+    }
+  }
+}
