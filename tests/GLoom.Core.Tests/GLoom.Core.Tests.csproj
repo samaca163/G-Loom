@@ -29,6 +29,7 @@
     <Compile Include="../../src/GLoom.Plugin/Mcp/State/**/*.cs" LinkBase="Mcp/State" />
     <Compile Include="../../src/GLoom.Plugin/Mcp/Host/McpHttpHost.cs" LinkBase="Mcp/Host" />
     <Compile Include="../../src/GLoom.Plugin/Mcp/Tools/Memory/**/*.cs" LinkBase="Mcp/Tools/Memory" />
+    <Compile Include="../../src/GLoom.Plugin/Mcp/Tools/Live/**/*.cs" LinkBase="Mcp/Tools/Live" />
   </ItemGroup>
 
   <ItemGroup>

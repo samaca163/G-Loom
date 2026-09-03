@@ -1,8 +1,10 @@
 using System;
 using System.Threading;
 using GLoom.Mcp.Host;
+using GLoom.Mcp.Host.Live;
 using GLoom.Mcp.Protocol;
 using GLoom.Mcp.State;
+using GLoom.Mcp.Tools.Live;
 using GLoom.Mcp.Tools.Memory;
 using GLoom.Vcs;
 using Rhino;
@@ -87,8 +89,12 @@ public static class McpService
             "any version; gloom_branches for the project's system options; gloom_tags and gloom_toolchain for " +
             "milestones and the Rhino / Grasshopper / Rhino.Inside.Revit / G-Loom versions they were pinned on. " +
             "The same facts are readable as gloom:// resources, and the prompts review-changes and design-history " +
-            "open a review or a history conversation. File arguments are absolute paths or paths relative to the " +
-            "project root; version arguments accept a label (V012), a sha, a tag, a branch, HEAD or \"working\".");
+            "open a review or a history conversation. The live canvas is read through gloom_documents (what is " +
+            "open), gloom_read_document (objects with runtime errors, warnings and output previews, unsaved edits " +
+            "included), gloom_read_outputs (the data on one object), gloom_solve (recompute; needs read-write), " +
+            "gloom_catalogue (installed components), gloom_canvas_image (a screenshot) and gloom_rhino_context. " +
+            "File arguments are absolute paths or paths relative to the project root; version arguments accept a " +
+            "label (V012), a sha, a tag, a branch, HEAD or \"working\".");
         d.ClientInitialized += (name, ver) =>
             RhinoApp.WriteLine($"[G-Loom] MCP client connected: {name} {ver}".TrimEnd());
         MemoryTools.Register(d, LiveSnapshot);
@@ -96,6 +102,7 @@ public static class McpService
         RecordTools.Register(d, LiveSnapshot, ToolchainSnapshot.Capture);
         d.Register(new GloomResources(LiveSnapshot));
         GloomPrompts.Register(d, LiveSnapshot);
+        LiveTools.Register(d, new LiveHost());
         return d;
     }
 

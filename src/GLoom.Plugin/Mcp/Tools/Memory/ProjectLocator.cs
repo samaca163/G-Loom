@@ -65,6 +65,6 @@ public static class ProjectLocator
             isActive);
     }
 
-    private static string Rel(string root, string full) =>
+    internal static string Rel(string root, string full) =>
         Path.GetRelativePath(root, full).Replace('\\', '/');
 }
