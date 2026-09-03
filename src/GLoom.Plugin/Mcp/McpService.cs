@@ -1,8 +1,10 @@
 using System;
 using System.Threading;
 using GLoom.Mcp.Host;
+using GLoom.Mcp.Host.Live;
 using GLoom.Mcp.Protocol;
 using GLoom.Mcp.State;
+using GLoom.Mcp.Tools.Live;
 using GLoom.Mcp.Tools.Memory;
 using GLoom.Serialization;
 using GLoom.Vcs;
@@ -89,12 +91,16 @@ public static class McpService
             "any version; gloom_branches for the project's system options; gloom_tags and gloom_toolchain for " +
             "milestones and the Rhino / Grasshopper / Rhino.Inside.Revit / G-Loom versions they were pinned on. " +
             "The same facts are readable as gloom:// resources, and the prompts review-changes and design-history " +
-            "open a review or a history conversation. In read-write mode the agent can also act on the project: " +
-            "gloom_commit commits the active definition as a new version, gloom_revert restores a previous version, " +
-            "gloom_switch_branch adopts a system option, and gloom_tag pins a milestone with its toolchain - each " +
+            "open a review or a history conversation. The live canvas is read through gloom_documents (what is " +
+            "open), gloom_read_document (objects with runtime errors, warnings and output previews, unsaved edits " +
+            "included), gloom_read_outputs (the data on one object), gloom_catalogue (the components installed in " +
+            "this Rhino), gloom_canvas_image (a screenshot) and gloom_rhino_context. In read-write mode the agent " +
+            "can also act on the project: gloom_commit commits the active definition as a new version, gloom_revert " +
+            "restores a previous version, gloom_switch_branch adopts a system option, gloom_tag pins a milestone " +
+            "with its toolchain, and gloom_solve recomputes the definition and reports what failed - each " +
             "attributed to the human, and gated to read-write access. File arguments are absolute paths or paths " +
-            "relative to the project root; version arguments accept a label (V012), a sha, a tag, a branch, HEAD or " +
-            "\"working\".");
+            "relative to the project root; version arguments accept a label (V012), a sha, a tag, a branch, HEAD " +
+            "or \"working\".");
         d.ClientInitialized += (name, ver) =>
             RhinoApp.WriteLine($"[G-Loom] MCP client connected: {name} {ver}".TrimEnd());
         MemoryTools.Register(d, LiveSnapshot);
@@ -103,6 +109,7 @@ public static class McpService
         WriteTools.Register(d, LiveSnapshot, SerializeActiveDocument, ReloadFromDisk, ReloadAllInRepo, ToolchainSnapshot.Capture, RefreshTracker);
         d.Register(new GloomResources(LiveSnapshot));
         GloomPrompts.Register(d, LiveSnapshot);
+        LiveTools.Register(d, new LiveHost());
         return d;
     }
 
