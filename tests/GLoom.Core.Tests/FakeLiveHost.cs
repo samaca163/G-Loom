@@ -132,6 +132,17 @@ internal sealed class FakeLiveHost : ILiveHost
 
     public SolveReport Solve(string? file, bool expireAll, TimeSpan timeout) => Answer("Solve", Report, file, expireAll, timeout)!;
 
+    /// <summary>Echoes each edit back as applied, so a test can assert on what reached the host
+    /// without a canvas. Set <see cref="ValueResults"/> to script refusals instead.</summary>
+    public List<ValueEditResult>? ValueResults { get; set; }
+
+    public IReadOnlyList<ValueEditResult> SetValues(string? file, IReadOnlyList<ValueEdit> edits, bool solve) =>
+        Answer("SetValues",
+            ValueResults ?? edits
+                .Select(e => new ValueEditResult(e.Target, true, Guid(1), e.Target, e.Target, "slider", "0", e.Value))
+                .ToList(),
+            file, edits, solve);
+
     public IReadOnlyList<CatalogueCategory> Categories() => Answer("Categories", CategoryList);
 
     public IReadOnlyList<CatalogueEntry> Search(string? query, string? category, bool includeObsolete, int maxResults) =>

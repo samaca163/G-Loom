@@ -128,6 +128,21 @@ public sealed record CatalogueDescription(
     IReadOnlyList<string> Keywords,
     string? InstantiationError = null);
 
+/// <summary><paramref name="Value"/> is text whatever the caller sent; the host parses it for
+/// the kind of object it lands on, because only the host knows what that is.</summary>
+public sealed record ValueEdit(string Target, string Value);
+
+public sealed record ValueEditResult(
+    string Target,
+    bool Applied,
+    string? InstanceGuid = null,
+    string? Name = null,
+    string? Nickname = null,
+    string? Kind = null,
+    string? Before = null,
+    string? After = null,
+    string? Reason = null);
+
 public enum ImageRegion { Visible, All, Objects }
 
 public sealed record CanvasImage(

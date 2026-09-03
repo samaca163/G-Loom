@@ -115,7 +115,9 @@ public static class McpService
         d.Register(new GloomResources(LiveSnapshot));
         GloomPrompts.Register(d, LiveSnapshot);
         EnvelopeTools.Register(d, LiveSnapshot, SerializeActiveDocument, SetOverlayReference, ReloadFromDisk, RefreshTracker);
-        LiveTools.Register(d, new LiveHost());
+        var liveHost = new LiveHost();
+        LiveTools.Register(d, liveHost);
+        ValueTools.Register(d, liveHost, LiveSnapshot);
         return d;
     }
 

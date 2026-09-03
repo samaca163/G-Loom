@@ -132,6 +132,16 @@ public sealed class Schema
         return this;
     }
 
+    /// <summary>An argument this builder has no shorthand for - an array, an object, a value
+    /// of no fixed type. Hand-written JSON Schema, so the builder stays small instead of
+    /// growing a method per shape.</summary>
+    public Schema Raw(string name, JsonObject schema, bool required = false)
+    {
+        _props[name] = schema;
+        if (required) _required.Add(name);
+        return this;
+    }
+
     private Schema Add(string name, string type, string description, bool required)
     {
         _props[name] = new JsonObject { ["type"] = type, ["description"] = description };
@@ -176,6 +186,24 @@ public static class Args
         if (v is JsonValue jv && jv.TryGetValue<bool>(out var b)) return b;
         throw new ToolArgumentException($"\"{name}\" must be a boolean.");
     }
+
+    public static JsonArray? Array(JsonObject a, string name)
+    {
+        var v = a[name];
+        if (v is null) return null;
+        return v as JsonArray ?? throw new ToolArgumentException($"\"{name}\" must be an array.");
+    }
+
+    /// <summary>A scalar of whatever type the caller sent, as text the host can parse for
+    /// whatever it lands on. Non-strings keep their JSON spelling, which is invariant by
+    /// definition - so 3.75 stays 3.75 in a Rhino whose locale writes 3,75.</summary>
+    public static string Scalar(JsonNode? node, string field) => node switch
+    {
+        null => throw new ToolArgumentException($"\"{field}\" is required."),
+        JsonValue v when v.TryGetValue<string>(out var s) => s,
+        JsonValue v => v.ToJsonString(),
+        _ => throw new ToolArgumentException($"\"{field}\" must be text, a number or true/false."),
+    };
 }
 
 public sealed class ToolArgumentException : Exception

@@ -95,6 +95,24 @@ public sealed class LiveHost : ILiveHost
         return Report(doc, ran: true, solverLocked: false, expireAll, clock.Elapsed.TotalMilliseconds);
     }, timeout);
 
+    public IReadOnlyList<ValueEditResult> SetValues(string? file, IReadOnlyList<ValueEdit> edits, bool solve) =>
+        UiThread.Run(() =>
+        {
+            var doc = Resolve(file);
+            var results = LiveValues.Apply(doc, edits, FindObject);
+
+            // Recompute only if something actually landed, and only when the document is in a
+            // state Grasshopper will solve - a disabled tab returns from NewSolution without
+            // solving, which would leave the stale error list reading as a fresh result.
+            if (solve && results.Any(r => r.Applied) && GH_Document.EnableSolutions && doc.Enabled
+                && doc.SolutionState != GH_ProcessStep.Process)
+            {
+                doc.NewSolution(false, GH_SolutionMode.CommandLine);
+            }
+
+            return results;
+        });
+
     public IReadOnlyList<CatalogueCategory> Categories() => UiThread.Run(() => LiveCatalogue.Categories());
 
     public IReadOnlyList<CatalogueEntry> Search(string? query, string? category, bool includeObsolete, int maxResults) =>

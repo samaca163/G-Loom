@@ -28,6 +28,11 @@ public interface ILiveHost
 
     SolveReport Solve(string? file, bool expireAll, TimeSpan timeout);
 
+    /// <summary>Sets persistent values on sliders, panels, toggles, value lists and colour
+    /// swatches, as one undoable step. Every edit is attempted; one that cannot be applied is
+    /// reported against its target rather than failing the batch.</summary>
+    IReadOnlyList<ValueEditResult> SetValues(string? file, IReadOnlyList<ValueEdit> edits, bool solve);
+
     IReadOnlyList<CatalogueCategory> Categories();
 
     /// <summary>Grasshopper's own fuzzy search when <paramref name="query"/> is given, else every
