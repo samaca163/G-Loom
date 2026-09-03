@@ -1472,15 +1472,13 @@ public sealed class GLoomPanel : Panel
                 var ghRel = Path.GetRelativePath(s.RepoPath, s.FilePath);
                 var jsonRel = Path.GetRelativePath(s.RepoPath, jsonFull);
 
-                // Stage first so a genuine no-op is caught BEFORE prompting
-                // for a message. Gate on what's actually staged, not on the
-                // canonical diff: a .gh-only change leaves the JSON identical
-                // but is still a real commit.
-                var staged = GLoomRepository.StageForCommit(
-                    s.RepoPath, json, jsonFull, alsoStageFullPath: s.FilePath);
-                if (staged.Count == 0)
+                // The index is repo-wide and stays staged across the modal below, so an
+                // agent committing in that window would carry these files away under its
+                // own message. Held until the commit lands or the staging is rolled back.
+                if (!IndexGate.TryEnter("the G-Loom panel"))
                 {
-                    MessageBox.Show("Nothing to commit (no changes since last commit).",
+                    MessageBox.Show(
+                        "An agent is committing right now. Try again in a moment.",
                         "G-Loom", MessageBoxButtons.OK, MessageBoxType.Information);
                     return;
                 }
@@ -1488,10 +1486,24 @@ public sealed class GLoomPanel : Panel
                 // Any exit without a commit (cancel, or an exception in the
                 // draft/dialog path) must unstage - a stale staged pair would
                 // silently ride into the next commit of a DIFFERENT file in
-                // the same repo.
+                // the same repo - and must release the index gate.
+                IReadOnlyList<string> staged = Array.Empty<string>();
                 var committed = false;
                 try
                 {
+                    // Stage first so a genuine no-op is caught BEFORE prompting
+                    // for a message. Gate on what's actually staged, not on the
+                    // canonical diff: a .gh-only change leaves the JSON identical
+                    // but is still a real commit.
+                    staged = GLoomRepository.StageForCommit(
+                        s.RepoPath, json, jsonFull, alsoStageFullPath: s.FilePath);
+                    if (staged.Count == 0)
+                    {
+                        MessageBox.Show("Nothing to commit (no changes since last commit).",
+                            "G-Loom", MessageBoxButtons.OK, MessageBoxType.Information);
+                        return;
+                    }
+
                     // Draft the dialog from the diff against this file's last
                     // committed version (file-scoped, so multi-file repos
                     // compare to the right parent). HEAD's JSON is read from
@@ -1534,6 +1546,7 @@ public sealed class GLoomPanel : Panel
                 {
                     if (!committed)
                         GLoomRepository.UnstagePaths(s.RepoPath, staged);
+                    IndexGate.Exit();
                 }
             }
 

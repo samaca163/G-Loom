@@ -108,12 +108,31 @@ public static class WriteTools
 
         var json = serializeActiveDocument();
 
+        // The panel stages its pair and holds it across a modal dialog; committing into
+        // that window would carry the human's files away under this message.
+        if (!IndexGate.TryEnter("an agent"))
+            return ToolResult.Error(
+                $"{IndexGate.Holder ?? "Someone else"} is committing right now, so the staging area is busy. Retry in a moment.");
+
         var jsonFull = Path.Combine(f.RepoRoot, f.JsonRel);
-        var staged = GLoomRepository.StageForCommit(f.RepoRoot, json, jsonFull, alsoStageFullPath: f.GhFullPath);
+        IReadOnlyList<string> staged;
+        try
+        {
+            staged = GLoomRepository.StageForCommit(f.RepoRoot, json, jsonFull, alsoStageFullPath: f.GhFullPath);
+        }
+        catch
+        {
+            IndexGate.Exit();
+            throw;
+        }
+
         if (staged.Count == 0)
+        {
+            IndexGate.Exit();
             return ToolResult.Text(
                 $"Nothing to commit: {f.BaseName} has no changes against its last committed version. Make an edit on the " +
                 "canvas first, then commit.");
+        }
 
         try
         {
@@ -149,6 +168,10 @@ public static class WriteTools
             GLoomRepository.UnstagePaths(f.RepoRoot, staged);
             return ToolResult.Error($"Commit failed (staged changes were rolled back): {ex.Message}");
         }
+        finally
+        {
+            IndexGate.Exit();
+        }
     }
 
     public static ToolResult Revert(string? file, string? version, LiveSnapshot? live, Action<string> reloadFromDisk)
@@ -163,7 +186,19 @@ public static class WriteTools
                 "gloom_revert needs a committed version to restore to (a label, SHA, tag or branch); \"working\" is the " +
                 "current state on disk, so there is nothing to revert to. gloom_history lists the versions that exist.");
 
-        GLoomRepository.Restore(f.RepoRoot, v.Sha, new[] { f.GhRel, f.JsonRel });
+        // A checkout of these paths rewrites the index entries for them, so it must not
+        // land while the panel is holding a staged pair.
+        if (!IndexGate.TryEnter("an agent"))
+            return ToolResult.Error(
+                $"{IndexGate.Holder ?? "Someone else"} is committing right now, so the staging area is busy. Retry in a moment.");
+        try
+        {
+            GLoomRepository.Restore(f.RepoRoot, v.Sha, new[] { f.GhRel, f.JsonRel });
+        }
+        finally
+        {
+            IndexGate.Exit();
+        }
         reloadFromDisk(f.GhFullPath);
 
         return ToolResult.Json(new
@@ -191,7 +226,20 @@ public static class WriteTools
                 $"\"{name}\" is not a branch on this project. Available: {string.Join(", ", branches.Select(b => b.Name))}.");
 
         var affected = GLoomRepository.ListAffectedGhFiles(f.RepoRoot, target.Name);
-        GLoomRepository.SwitchBranch(f.RepoRoot, target.Name);
+
+        // A branch switch rewrites the whole index; git would either refuse or carry the
+        // panel's staged pair across to the other system option.
+        if (!IndexGate.TryEnter("an agent"))
+            return ToolResult.Error(
+                $"{IndexGate.Holder ?? "Someone else"} is committing right now, so the staging area is busy. Retry in a moment.");
+        try
+        {
+            GLoomRepository.SwitchBranch(f.RepoRoot, target.Name);
+        }
+        finally
+        {
+            IndexGate.Exit();
+        }
         reloadAllInRepo(f.RepoRoot);
 
         return ToolResult.Json(new
